@@ -59,7 +59,7 @@ ContentExtension::ContentExtension(const String& identifier, Ref<CompiledContent
 
 DFABytecodeInterpreter::Actions ContentExtension::interpretURLFilters(const String& url, ResourceFlags flags) const
 {
-    return m_urlFiltersInterpreter.interpret(url, flags);
+    return m_urlFiltersInterpreter.interpret(url, flags, &m_cachedTopURLActions, &m_cachedFrameURLActions);
 }
 
 uint32_t ContentExtension::findFirstIgnoreRule() const
@@ -124,6 +124,8 @@ void ContentExtension::populateTopURLActionCacheIfNeeded(const URL& topURL) cons
     if (m_cachedTopURL == topURL)
         return;
 
+    // Conditional resume entries cannot outlive either document URL.
+    m_urlFiltersInterpreter.clearResumeCache();
     DFABytecodeInterpreter interpreter(m_compiledExtension->topURLFiltersBytecode());
     auto topURLActions = interpreter.interpret(topURL.string(), AllResourceFlags);
 
@@ -141,6 +143,8 @@ void ContentExtension::populateFrameURLActionCacheIfNeeded(const URL& frameURL) 
     if (m_cachedFrameURL == frameURL)
         return;
 
+    // Conditional resume entries cannot outlive either document URL.
+    m_urlFiltersInterpreter.clearResumeCache();
     DFABytecodeInterpreter interpreter(m_compiledExtension->frameURLFiltersBytecode());
     auto frameURLActions = interpreter.interpret(frameURL.string(), AllResourceFlags);
 

@@ -180,14 +180,37 @@ static int32_t LEGACY_NODELETE getJumpDistance(std::span<const uint8_t> bytecode
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-void DFABytecodeInterpreter::interpretAppendAction(uint32_t& programCounter, Actions& actions)
+static bool actionMatchesConditions(uint64_t actionAndFlags, const DFABytecodeInterpreter::Actions* topURLActions, const DFABytecodeInterpreter::Actions* frameURLActions)
+{
+    if (!topURLActions || !frameURLActions)
+        return true;
+    ResourceFlags flags = actionAndFlags >> 32;
+    switch (static_cast<ActionCondition>(flags & ActionConditionMask)) {
+    case ActionCondition::None:
+        return true;
+    case ActionCondition::IfTopURL:
+        return topURLActions->contains(actionAndFlags);
+    case ActionCondition::UnlessTopURL:
+        return !topURLActions->contains(actionAndFlags);
+    case ActionCondition::IfFrameURL:
+        return frameURLActions->contains(actionAndFlags);
+    case ActionCondition::UnlessFrameURL:
+        return !frameURLActions->contains(actionAndFlags);
+    }
+    ASSERT_NOT_REACHED();
+    return false;
+}
+
+void DFABytecodeInterpreter::interpretAppendAction(uint32_t& programCounter, Actions& actions, const Actions* topURLActions, const Actions* frameURLActions)
 {
     ASSERT(getInstruction(m_bytecode, programCounter) == DFABytecodeInstruction::AppendAction);
     auto instructionLocation = programCounter++;
-    actions.add(consumeAction(m_bytecode, programCounter, instructionLocation));
+    auto action = consumeAction(m_bytecode, programCounter, instructionLocation);
+    if (actionMatchesConditions(action, topURLActions, frameURLActions))
+        actions.add(action);
 }
 
-void DFABytecodeInterpreter::interpretTestFlagsAndAppendAction(uint32_t& programCounter, ResourceFlags flags, Actions& actions)
+void DFABytecodeInterpreter::interpretTestFlagsAndAppendAction(uint32_t& programCounter, ResourceFlags flags, Actions& actions, const Actions* topURLActions, const Actions* frameURLActions)
 {
     auto instructionLocation = programCounter;
     auto flagsToCheck = consumeResourceFlagsAndInstruction(m_bytecode, programCounter);
@@ -206,7 +229,8 @@ void DFABytecodeInterpreter::interpretTestFlagsAndAppendAction(uint32_t& program
     auto actionWithoutFlags = consumeAction(m_bytecode, programCounter, instructionLocation);
     if (loadTypeMatches && loadContextMatches && resourceTypeMatches && requestMethodMatches) {
         uint64_t actionAndFlags = (static_cast<uint64_t>(flagsToCheck) << 32) | static_cast<uint64_t>(actionWithoutFlags);
-        actions.add(actionAndFlags);
+        if (actionMatchesConditions(actionAndFlags, topURLActions, frameURLActions))
+            actions.add(actionAndFlags);
     }
 }
 
@@ -257,6 +281,11 @@ DFABytecodeInterpreter::DFABytecodeInterpreter(std::span<const uint8_t> bytecode
 }
 
 auto DFABytecodeInterpreter::interpret(const String& urlString, ResourceFlags flags) -> Actions
+{
+    return interpret(urlString, flags, nullptr, nullptr);
+}
+
+auto DFABytecodeInterpreter::interpret(const String& urlString, ResourceFlags flags, const Actions* topURLActions, const Actions* frameURLActions) -> Actions
 {
     UTF8CString urlCString;
     std::span<const Latin1Character> url;
@@ -335,7 +364,7 @@ auto DFABytecodeInterpreter::interpret(const String& urlString, ResourceFlags fl
                     auto instructionLocation = programCounter++;
                     consumeAction(m_bytecode, programCounter, instructionLocation);
                 } else if (instruction == DFABytecodeInstruction::TestFlagsAndAppendAction)
-                    interpretTestFlagsAndAppendAction(programCounter, flags, dfaDelta);
+                    interpretTestFlagsAndAppendAction(programCounter, flags, dfaDelta, topURLActions, frameURLActions);
                 else
                     break;
             }
@@ -453,11 +482,11 @@ auto DFABytecodeInterpreter::interpret(const String& urlString, ResourceFlags fl
             }
                     
             case DFABytecodeInstruction::AppendAction:
-                interpretAppendAction(programCounter, dfaDelta);
+                interpretAppendAction(programCounter, dfaDelta, topURLActions, frameURLActions);
                 break;
 
             case DFABytecodeInstruction::TestFlagsAndAppendAction:
-                interpretTestFlagsAndAppendAction(programCounter, flags, dfaDelta);
+                interpretTestFlagsAndAppendAction(programCounter, flags, dfaDelta, topURLActions, frameURLActions);
                 break;
                     
             default:

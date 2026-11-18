@@ -23,6 +23,8 @@
  */
 
 #include "config.h"
+#include <cstdlib>
+#include <wtf/text/StringView.h>
 #include "DefaultResourceLoadPriority.h"
 
 namespace WebCore {
@@ -37,9 +39,15 @@ ResourceLoadPriority DefaultResourceLoadPriority::forResourceType(CachedResource
     case CachedResource::Type::JSON:
     case CachedResource::Type::Script:
         return ResourceLoadPriority::High;
+    case CachedResource::Type::FontResource:
+#if PLATFORM(WPE)
+        static const bool prioritizeFonts = StringView::fromLatin1(std::getenv("WPE_FONT_PRIORITY")) != "0"_s;
+        if (prioritizeFonts)
+            return ResourceLoadPriority::VeryHigh;
+#endif
+        return ResourceLoadPriority::Medium;
     case CachedResource::Type::SVGFontResource:
     case CachedResource::Type::MediaResource:
-    case CachedResource::Type::FontResource:
     case CachedResource::Type::RawResource:
     case CachedResource::Type::Icon:
         return ResourceLoadPriority::Medium;

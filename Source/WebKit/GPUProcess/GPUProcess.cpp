@@ -24,6 +24,8 @@
  */
 
 #include "config.h"
+#include <cstdlib>
+#include <wtf/text/StringView.h>
 #include "GPUProcess.h"
 
 #if ENABLE(GPU_PROCESS)
@@ -162,6 +164,19 @@ void GPUProcess::removeGPUConnectionToWebProcess(GPUConnectionToWebProcess& conn
     removeSnapshotsForProcess(connection.webProcessIdentifier());
 
     recomputeNowPlayingOwner();
+
+#if PLATFORM(WPE)
+    static const bool idleExitEnabled = StringView::fromLatin1(std::getenv("WPE_IDLE_GPU_EXIT")) != "0"_s;
+    if (idleExitEnabled && m_webProcessConnections.isEmpty()) {
+        // The singleton outlives this timer; a new connection prevents its idle exit.
+        static NeverDestroyed<RunLoop::Timer> emptyConnectionExitTimer(RunLoop::mainSingleton(), "GPUProcess::EmptyConnectionExitTimer"_s, [] {
+            auto& process = GPUProcess::singleton();
+            if (process.m_webProcessConnections.isEmpty())
+                process.tryExitIfUnused();
+        });
+        emptyConnectionExitTimer.get().startOneShot(5_s);
+    }
+#endif
 
     tryExitIfUnusedAndUnderMemoryPressure();
 }

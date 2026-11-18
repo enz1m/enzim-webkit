@@ -25,6 +25,8 @@
  */
 
 #include "config.h"
+#include <cstdlib>
+#include <wtf/text/StringView.h>
 #include "LocalFrameView.h"
 
 #include "AXObjectCache.h"
@@ -6279,6 +6281,12 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
 
         if (!isVisible(document->body()))
             return false;
+
+#if PLATFORM(WPE)
+        static const bool eagerStyledPaint = StringView::fromLatin1(std::getenv("WPE_EAGER_STYLED_PAINT")) != "0"_s;
+        if (eagerStyledPaint)
+            return true;
+#endif
 
         // The first few hundred characters rarely contain the interesting content of the page.
         if (m_visuallyNonEmptyCharacterCount > visualCharacterThreshold)

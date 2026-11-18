@@ -59,8 +59,11 @@ public:
     WEBCORE_EXPORT Actions actionsMatchingEverything();
 
 private:
-    void interpretAppendAction(unsigned& programCounter, Actions&);
-    void interpretTestFlagsAndAppendAction(unsigned& programCounter, ResourceFlags, Actions&);
+    friend class ContentExtension;
+    Actions interpret(const String&, ResourceFlags, const Actions* topURLActions, const Actions* frameURLActions);
+    void clearResumeCache() { if (m_resumeCache) m_resumeCache->clear(); }
+    void interpretAppendAction(unsigned& programCounter, Actions&, const Actions* topURLActions = nullptr, const Actions* frameURLActions = nullptr);
+    void interpretTestFlagsAndAppendAction(unsigned& programCounter, ResourceFlags, Actions&, const Actions* topURLActions = nullptr, const Actions* frameURLActions = nullptr);
 
     template<bool caseSensitive>
     void LEGACY_NODELETE interpretJumpTable(std::span<const Latin1Character> url, uint32_t& urlIndex, uint32_t& programCounter);

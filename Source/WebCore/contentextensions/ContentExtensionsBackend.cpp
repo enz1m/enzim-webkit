@@ -110,9 +110,9 @@ auto ContentExtensionsBackend::actionsFromContentRuleList(const ContentExtension
 
     const auto& compiledExtension = contentExtension.compiledExtension();
 
-    auto actionLocations = contentExtension.interpretURLFilters(urlString, flags);
     auto& topURLActions = contentExtension.topURLActions(resourceLoadInfo.mainDocumentURL);
     auto& frameURLActions = contentExtension.frameURLActions(resourceLoadInfo.frameURL);
+    auto actionLocations = contentExtension.interpretURLFilters(urlString, flags);
 
     actionLocations.removeIf([&](uint64_t actionAndFlags) {
         ResourceFlags flags = actionAndFlags >> 32;
