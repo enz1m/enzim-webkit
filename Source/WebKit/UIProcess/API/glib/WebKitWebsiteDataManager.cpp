@@ -1683,3 +1683,31 @@ GList* webkit_website_data_manager_get_itp_summary_finish(WebKitWebsiteDataManag
 
     return static_cast<GList*>(g_task_propagate_pointer(G_TASK(result), error));
 }
+
+extern "C" WEBKIT_API void webkit_website_data_manager_enzui_remove_origin(WebKitWebsiteDataManager* manager, WebKitWebsiteDataTypes types, const gchar* origin, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
+{
+    g_return_if_fail(WEBKIT_IS_WEBSITE_DATA_MANAGER(manager));
+    auto task = adoptGRef(g_task_new(manager, cancellable, callback, userData));
+    constexpr uint32_t supported = WEBKIT_WEBSITE_DATA_MEMORY_CACHE | WEBKIT_WEBSITE_DATA_DISK_CACHE
+        | WEBKIT_WEBSITE_DATA_SESSION_STORAGE | WEBKIT_WEBSITE_DATA_LOCAL_STORAGE
+        | WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES | WEBKIT_WEBSITE_DATA_DEVICE_ID_HASH_SALT
+        | WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS | WEBKIT_WEBSITE_DATA_DOM_CACHE
+        | WEBKIT_WEBSITE_DATA_FILE_SYSTEM;
+    URL url { String::fromUTF8(origin ? origin : "") };
+    if (!types || (types & ~supported) || !url.isValid() || !url.protocolIsInHTTPFamily()
+        || !url.encodedUser().isEmpty() || !url.encodedPassword().isEmpty() || url.hasQuery() || url.hasFragmentIdentifier()
+        || (!url.path().isEmpty() && url.path() != "/"_s)) {
+        g_task_return_new_error(task.get(), G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Expected an HTTP(S) origin and origin-scoped data types");
+        return;
+    }
+    if (g_task_return_error_if_cancelled(task.get()))
+        return;
+    WebsiteDataRecord record;
+    record.origins.add(WebCore::SecurityOriginData::fromURL(url));
+    record.types = toWebsiteDataTypes(types);
+    Vector<WebsiteDataRecord> records;
+    records.append(WTF::move(record));
+    manager->priv->websiteDataStore->removeData(toWebsiteDataTypes(types), records, [task = WTF::move(task)] {
+        g_task_return_boolean(task.get(), TRUE);
+    });
+}

@@ -254,3 +254,22 @@ guint64 webkit_website_data_get_size(WebKitWebsiteData* websiteData, WebKitWebsi
 
     return totalSize;
 }
+
+extern "C" WEBKIT_API gchar** webkit_website_data_enzui_copy_origins(WebKitWebsiteData* data)
+{
+    g_return_val_if_fail(data, nullptr);
+    if (data->record.origins.size() > 16384)
+        return nullptr;
+    size_t bytes = 0;
+    for (const auto& origin : data->record.origins) {
+        auto serialized = origin.toString().utf8();
+        bytes += serialized.length();
+        if (serialized.length() > 8192 || bytes > 16 * 1024 * 1024)
+            return nullptr;
+    }
+    auto** result = g_new0(gchar*, data->record.origins.size() + 1);
+    size_t index = 0;
+    for (const auto& origin : data->record.origins)
+        result[index++] = gStrdup(origin.toString().utf8());
+    return result;
+}

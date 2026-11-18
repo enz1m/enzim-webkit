@@ -535,7 +535,7 @@ void IconDatabase::checkIconURLAndSetPageURLIfNeeded(const String& iconURL, cons
     });
 }
 
-void IconDatabase::loadIconsForPageURL(const String& pageURL, AllowDatabaseWrite allowDatabaseWrite, CompletionHandler<void(Vector<PlatformImagePtr>&&)>&& completionHandler)
+void IconDatabase::loadIconsForPageURL(const String& pageURL, AllowDatabaseWrite allowDatabaseWrite, CompletionHandler<void(Vector<PlatformImagePtr>&&, Vector<String>&&)>&& completionHandler)
 {
     ASSERT(isMainRunLoop());
 
@@ -543,7 +543,18 @@ void IconDatabase::loadIconsForPageURL(const String& pageURL, AllowDatabaseWrite
         ListHashSet<String> iconURLs;
         {
             Locker locker { m_pageURLToIconURLMapLock };
+#if PLATFORM(WPE)
+            auto it = m_pageURLToIconURLMap.find(pageURL);
+            if (it != m_pageURLToIconURLMap.end()) {
+                for (const auto& url : it->value) {
+                    if (iconURLs.size() == 32)
+                        break;
+                    iconURLs.add(url);
+                }
+            }
+#else
             iconURLs = m_pageURLToIconURLMap.get(pageURL);
+#endif
         }
 
         Vector<Vector<uint8_t>> iconDatas(iconURLs.size());
@@ -573,6 +584,7 @@ void IconDatabase::loadIconsForPageURL(const String& pageURL, AllowDatabaseWrite
             RELEASE_ASSERT(iconURLs.size() == iconDatas.size());
 
             Vector<PlatformImagePtr> icons;
+            Vector<String> sources;
             icons.reserveCapacity(iconURLs.size());
             unsigned iconDataIndex = 0;
             for (const auto& iconURL : iconURLs) {
@@ -590,9 +602,18 @@ void IconDatabase::loadIconsForPageURL(const String& pageURL, AllowDatabaseWrite
 
                     auto addResult = m_loadedIcons.set(iconURL, std::make_pair<PlatformImagePtr, MonotonicTime>(nullptr, MonotonicTime::now()));
                     if (!iconData.isEmpty()) {
+#if PLATFORM(WPE)
+                        if (iconData.size() > 256 * 1024)
+                            return nullptr;
+#endif
                         auto image = BitmapImage::create();
                         if (image->setData(SharedBuffer::create(WTF::move(iconData)), true) < EncodedDataStatus::SizeAvailable)
                             return nullptr;
+
+#if PLATFORM(WPE)
+                        if (image->size().width() > 512 || image->size().height() > 512)
+                            return nullptr;
+#endif
 
                         auto nativeImage = image->currentNativeImage();
                         if (!nativeImage)
@@ -605,10 +626,12 @@ void IconDatabase::loadIconsForPageURL(const String& pageURL, AllowDatabaseWrite
                     startClearLoadedIconsTimer();
                     return icon;
                 }();
-                if (icon)
+                if (icon) {
                     icons.append(WTF::move(icon));
+                    sources.append(iconURL);
+                }
             }
-            completionHandler(WTF::move(icons));
+            completionHandler(WTF::move(icons), WTF::move(sources));
         });
     });
 }
@@ -624,6 +647,22 @@ ListHashSet<String> IconDatabase::iconURLsForPageURL(const String& pageURL)
 void IconDatabase::setIconForPageURL(const String& iconURL, std::span<const uint8_t> iconData, const String& pageURL, AllowDatabaseWrite allowDatabaseWrite, CompletionHandler<void(bool)>&& completionHandler)
 {
     ASSERT(isMainRunLoop());
+
+#if PLATFORM(WPE)
+    // Favicon decoding is bounded independently of the page's image budget.
+    if (iconData.size() > 256 * 1024) {
+        completionHandler(false);
+        return;
+    }
+    if (!iconData.empty()) {
+        Ref image = BitmapImage::create();
+        if (image->setData(SharedBuffer::create(iconData), true) < EncodedDataStatus::SizeAvailable
+            || image->size().width() > 512 || image->size().height() > 512) {
+            completionHandler(false);
+            return;
+        }
+    }
+#endif
 
     // If database write is not allowed load the icon to cache it in memory only.
     if (m_allowDatabaseWrite == AllowDatabaseWrite::No || allowDatabaseWrite == AllowDatabaseWrite::No) {

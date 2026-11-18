@@ -69,7 +69,9 @@ static AtkObject* wpeApplicationAccessibleAtkRefChild(AtkObject* atkObject, int 
         return nullptr;
 
     auto* toplevel = accessible->priv->toplevels[index];
-    return ATK_OBJECT(g_object_ref(wpeToplevelGetOrCreateAccessibleAtk(toplevel)));
+    auto* child = wpeToplevelGetOrCreateAccessibleAtk(toplevel);
+    atk_object_set_parent(child, atkObject);
+    return ATK_OBJECT(g_object_ref(child));
 }
 
 static const char* wpeApplicationAccessibleAtkGetName(AtkObject*)
@@ -99,23 +101,26 @@ AtkObject* wpeApplicationAccessibleAtkNew()
 
 void wpeApplicationAccessibleAtkToplevelCreated(WPEApplicationAccessibleAtk* accessible, WPEToplevel* toplevel)
 {
-    accessible->priv->toplevels.append(toplevel);
+    bool alreadyRegistered = accessible->priv->toplevels.contains(toplevel);
+    if (!alreadyRegistered)
+        accessible->priv->toplevels.append(toplevel);
     auto* toplevelAccessible = wpeToplevelGetOrCreateAccessibleAtk(toplevel);
     atk_object_set_parent(toplevelAccessible, ATK_OBJECT(accessible));
-    g_signal_emit_by_name(accessible, "children-changed::add", accessible->priv->toplevels.size() - 1, toplevelAccessible, nullptr);
+    if (!alreadyRegistered)
+        g_signal_emit_by_name(accessible, "children-changed::add", accessible->priv->toplevels.size() - 1, toplevelAccessible, nullptr);
 }
 
 void wpeApplicationAccessibleAtkToplevelDestroyed(WPEApplicationAccessibleAtk* accessible, WPEToplevel* toplevel)
 {
-    auto* toplevelAccessible = wpeToplevelGetAccessibleAtk(toplevel);
-    if (!toplevelAccessible)
-        return;
-
     auto index = accessible->priv->toplevels.find(toplevel);
     if (index == notFound)
         return;
 
     accessible->priv->toplevels.removeAt(index);
+    auto* toplevelAccessible = wpeToplevelGetAccessibleAtk(toplevel);
+    if (!toplevelAccessible)
+        return;
+
     g_signal_emit_by_name(accessible, "children-changed::remove", index, toplevelAccessible, nullptr);
     atk_object_set_parent(toplevelAccessible, nullptr);
 }

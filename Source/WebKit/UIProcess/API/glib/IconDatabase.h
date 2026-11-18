@@ -45,7 +45,7 @@ public:
     void invalidate();
 
     void checkIconURLAndSetPageURLIfNeeded(const String& iconURL, const String& pageURL, AllowDatabaseWrite, CompletionHandler<void(bool, bool)>&&);
-    void loadIconsForPageURL(const String&, AllowDatabaseWrite, CompletionHandler<void(Vector<WebCore::PlatformImagePtr>&&)>&&);
+    void loadIconsForPageURL(const String&, AllowDatabaseWrite, CompletionHandler<void(Vector<WebCore::PlatformImagePtr>&&, Vector<String>&&)>&&);
     ListHashSet<String> iconURLsForPageURL(const String&);
     void setIconForPageURL(const String& iconURL, std::span<const uint8_t>, const String& pageURL, AllowDatabaseWrite, CompletionHandler<void(bool)>&&);
     void clear(CompletionHandler<void()>&&);

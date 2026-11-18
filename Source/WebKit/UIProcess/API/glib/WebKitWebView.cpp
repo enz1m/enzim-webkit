@@ -994,6 +994,7 @@ static void webkitWebViewConstructed(GObject* object)
 #if PLATFORM(WPE)
     // A versioned capability advertises the renderer's preallocation bound to embedding hosts.
     g_object_set_data(object, "enzui-full-document-snapshot-max-pixels-v1", GUINT_TO_POINTER(16 * 1024 * 1024));
+    g_object_set_data(object, "enzui-bounded-favicon-v1", GUINT_TO_POINTER(1));
 #endif
 
     WebKitWebView* webView = WEBKIT_WEB_VIEW(object);
@@ -2909,7 +2910,14 @@ void webkitWebViewGetLoadDecisionForIcons(WebKitWebView* webView, const HashMap<
 
     const auto isEphemeral = webkitWebViewIsEphemeral(webView);
     const auto& activeURL = getPage(webView).pageLoadState().activeURL().string();
+    unsigned candidateCount = 0;
     for (const auto& [identifier, icon] : icons) {
+#if PLATFORM(WPE)
+        if (++candidateCount > 32 || icon.url.string().length() > 8192)
+            continue;
+#else
+        UNUSED_VARIABLE(candidateCount);
+#endif
         // FIXME: Maybe we should consider other icon types as loadable.
         if (!icon.url.protocolIsInHTTPFamily() || icon.type != LinkIconType::Favicon)
             continue;

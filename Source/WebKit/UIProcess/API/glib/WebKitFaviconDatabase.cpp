@@ -202,7 +202,7 @@ void webkitFaviconDatabaseGetFaviconInternal(WebKitFaviconDatabase* database, UT
     GRefPtr<GTask> task = adoptGRef(g_task_new(database, cancellable, callback, userData));
     WebKitFaviconDatabasePrivate* priv = database->priv;
     priv->iconDatabase->loadIconsForPageURL(String::fromUTF8(pageURI.span()), isEphemeral ? IconDatabase::AllowDatabaseWrite::No : IconDatabase::AllowDatabaseWrite::Yes,
-        [task = WTF::move(task), pageURI = UTF8CString { pageURI.span() }](Vector<PlatformImagePtr>&& icons) {
+        [task = WTF::move(task), pageURI = UTF8CString { pageURI.span() }](Vector<PlatformImagePtr>&& icons, Vector<String>&&) {
             if (icons.isEmpty()) {
                 SAFE_G_TASK_RETURN_NEW_ERROR(task.get(), WEBKIT_FAVICON_DATABASE_ERROR, WEBKIT_FAVICON_DATABASE_ERROR_FAVICON_UNKNOWN,
                     _("Unknown favicon for page %s"), pageURI);
@@ -297,8 +297,9 @@ void webkit_favicon_database_get_page_icons(WebKitFaviconDatabase* database, con
         return g_task_report_new_error(database, callback, userData, 0, WEBKIT_FAVICON_DATABASE_ERROR, WEBKIT_FAVICON_DATABASE_ERROR_FAVICON_NOT_FOUND, _("Page %s does not have a favicon"), pageURI);
 
     auto task = adoptGRef(g_task_new(database, cancellable, callback, userData));
-    database->priv->iconDatabase->loadIconsForPageURL(uriString, IconDatabase::AllowDatabaseWrite::Yes, [task = WTF::move(task)](Vector<PlatformImagePtr>&& icons) {
-        auto images = icons.map([](PlatformImagePtr image) -> GRefPtr<WebKitImage> {
+    database->priv->iconDatabase->loadIconsForPageURL(uriString, IconDatabase::AllowDatabaseWrite::Yes, [task = WTF::move(task)](Vector<PlatformImagePtr>&& icons, Vector<String>&& sources) {
+        size_t sourceIndex = 0;
+        auto images = icons.map([&sources, &sourceIndex](PlatformImagePtr image) -> GRefPtr<WebKitImage> {
             SkPixmap pixmap;
             RELEASE_ASSERT(image->peekPixels(&pixmap));
 
@@ -323,7 +324,11 @@ void webkit_favicon_database_get_page_icons(WebKitFaviconDatabase* database, con
             auto bytes = adoptGRef(g_bytes_new_with_free_func(pixmap.addr32(), pixmap.computeByteSize(), [](void* data) {
                 static_cast<SkImage*>(data)->unref();
             }, image.release()));
-            return adoptGRef(webkitImageNew(width, height, stride, WTF::move(bytes)));
+            auto result = adoptGRef(webkitImageNew(width, height, stride, WTF::move(bytes)));
+            auto source = sources[sourceIndex++].utf8();
+            if (source.length() <= 8192)
+                g_object_set_data_full(G_OBJECT(result.get()), "enzui-favicon-source-v1", gStrdup(source), g_free);
+            return result;
         });
 
         g_task_return_pointer(task.get(), webkitImageListCreate(WTF::move(images)), [](void* data) {

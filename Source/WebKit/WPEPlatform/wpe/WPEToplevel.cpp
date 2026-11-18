@@ -118,12 +118,10 @@ static void wpeToplevelDispose(GObject* object)
 
 #if USE(ATK)
     auto* toplevel = WPE_TOPLEVEL(object);
-    if (toplevel->priv->accessible) {
-        auto* atkRoot = atk_get_root();
-        if (WPE_IS_APPLICATION_ACCESSIBLE_ATK(atkRoot))
-            wpeApplicationAccessibleAtkToplevelDestroyed(WPE_APPLICATION_ACCESSIBLE_ATK(atkRoot), toplevel);
-        toplevel->priv->accessible = nullptr;
-    }
+    auto* atkRoot = atk_get_root();
+    if (WPE_IS_APPLICATION_ACCESSIBLE_ATK(atkRoot))
+        wpeApplicationAccessibleAtkToplevelDestroyed(WPE_APPLICATION_ACCESSIBLE_ATK(atkRoot), toplevel);
+    toplevel->priv->accessible = nullptr;
 #endif
 
     G_OBJECT_CLASS(wpe_toplevel_parent_class)->dispose(object);

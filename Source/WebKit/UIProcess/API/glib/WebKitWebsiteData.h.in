@@ -132,6 +132,9 @@ WEBKIT_API guint64
 webkit_website_data_get_size      (WebKitWebsiteData     *website_data,
                                    WebKitWebsiteDataTypes types);
 
+WEBKIT_API gchar **
+webkit_website_data_enzui_copy_origins (WebKitWebsiteData *website_data);
+
 G_END_DECLS
 
 #endif /* WebKitWebsiteData_h */

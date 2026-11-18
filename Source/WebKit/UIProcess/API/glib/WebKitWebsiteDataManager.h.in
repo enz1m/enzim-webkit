@@ -252,6 +252,14 @@ webkit_website_data_manager_get_itp_summary_finish     (WebKitWebsiteDataManager
                                                         GAsyncResult             *result,
                                                         GError                  **error);
 
+WEBKIT_API void
+webkit_website_data_manager_enzui_remove_origin (WebKitWebsiteDataManager *manager,
+                                                WebKitWebsiteDataTypes types,
+                                                const gchar *origin,
+                                                GCancellable *cancellable,
+                                                GAsyncReadyCallback callback,
+                                                gpointer user_data);
+
 G_END_DECLS
 
 #endif
