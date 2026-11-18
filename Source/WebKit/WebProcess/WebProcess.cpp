@@ -151,6 +151,18 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #endif
 #endif
+#if PLATFORM(WPE)
+#include <JavaScriptCore/BlockDirectoryInlines.h>
+#include <JavaScriptCore/MarkedBlockInlines.h>
+#include <JavaScriptCore/MarkedSpaceInlines.h>
+#include <JavaScriptCore/Subspace.h>
+#include <JavaScriptCore/SubspaceInlines.h>
+#include <malloc.h>
+#include <sys/mman.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/core/SkGraphics.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#endif
 #include <WebCore/PageGroup.h>
 #include <WebCore/PermissionController.h>
 #include <WebCore/PlatformKeyboardEvent.h>
@@ -1882,6 +1894,61 @@ void WebProcess::failSnapshot(RemoteSnapshotIdentifier snapshotIdentifier)
 
 #endif
 
+#if PLATFORM(WPE)
+// Gives back the pages inside partly used JavaScript heap blocks that hold no live cell. The heap
+// does not move cells, so a block with one survivor stays, but its other pages need not; V8 does
+// the same with the free ranges of a page when it collects to reduce memory. For use right after a
+// synchronous full collection, which leaves the blocks swept: a swept dead cell is not read again
+// until its block is swept anew, and a zero-filled cell then reads as one already destroyed. A
+// block being allocated from keeps its free list in its free cells, and an unswept one holds dead
+// cells that still have destructors to run; both are left alone. Returns the bytes given back.
+static size_t releaseFreePagesInJavaScriptHeapBlocks(JSC::VM& vm)
+{
+    constexpr size_t pageSize = 4 * KB;
+    constexpr size_t pagesPerBlock = JSC::MarkedBlock::blockSize / pageSize;
+    static_assert(pagesPerBlock > 1 && sizeof(JSC::MarkedBlock::Header) <= pageSize);
+    if (WTF::pageSize() != pageSize)
+        return 0;
+
+    JSC::JSLockHolder lock(vm);
+    if (vm.heap.collectionScope() || vm.heap.worldIsStopped())
+        return 0;
+
+    size_t released = 0;
+    vm.heap.objectSpace().forEachSubspace([&](JSC::Subspace& subspace) {
+        subspace.forEachDirectory([&](JSC::BlockDirectory& directory) {
+            directory.forEachBlock([&](JSC::MarkedBlock::Handle* handle) {
+                directory.assertIsMutatorOrMutatorIsStopped();
+                if (handle->isFreeListed() || directory.isUnswept(handle) || directory.isInUse(handle) || directory.isAllocated(handle) || directory.isEmpty(handle))
+                    return;
+                std::array<bool, pagesPerBlock> used { };
+                used[0] = true; // The block's header.
+                size_t cellSize = handle->cellSize();
+                handle->forEachLiveCell([&](size_t, JSC::HeapCell* cell, JSC::HeapCell::Kind) {
+                    size_t begin = reinterpret_cast<uintptr_t>(cell) & ~JSC::MarkedBlock::blockMask;
+                    for (size_t page = begin / pageSize; page <= (begin + cellSize - 1) / pageSize; ++page)
+                        used[page] = true;
+                    return IterationStatus::Continue;
+                });
+                auto base = reinterpret_cast<uintptr_t>(&handle->block());
+                for (size_t page = 1; page < pagesPerBlock; ++page) {
+                    if (used[page])
+                        continue;
+                    size_t end = page + 1;
+                    while (end < pagesPerBlock && !used[end])
+                        ++end;
+                    if (!madvise(reinterpret_cast<void*>(base + page * pageSize), (end - page) * pageSize, MADV_DONTNEED))
+                        released += (end - page) * pageSize;
+                    page = end;
+                }
+            });
+        });
+        return IterationStatus::Continue;
+    });
+    return released;
+}
+#endif
+
 void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::ActivityState> changed)
 {
     if (changed & WebCore::ActivityState::IsVisible) {
@@ -1937,6 +2004,12 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
                 MemoryCache::singleton().pruneLiveResourcesToSize(0, true);
                 GarbageCollectionController::singleton().deleteAllCode(JSC::DeleteAllCodeIfNotCollecting);
                 GarbageCollectionController::singleton().garbageCollectNow();
+                // WPE_JS_HEAP_PAGE_RELEASE=0 leaves the heap's blocks whole.
+                static const bool releaseHeapPages = [] {
+                    const char* value = getenv("WPE_JS_HEAP_PAGE_RELEASE");
+                    return !value || *value != '0';
+                }();
+                size_t heapPagesReleased = releaseHeapPages ? releaseFreePagesInJavaScriptHeapBlocks(commonVM()) : 0;
                 WTF::releaseFastMallocFreeMemory();
                 process->releaseSystemMallocMemory();
                 if (trace) {
@@ -1953,6 +2026,10 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
                     JSC::JSLockHolder lock(vm);
                     auto cache = MemoryCache::singleton().getStatistics();
                     size_t footprint = WTF::memoryFootprint();
+                    auto systemMalloc = mallinfo2();
+                    WTFLogAlways("WPE_HIDDEN_TRIM pid=%d jsHeapPagesReleasedK=%zu systemMallocArenaK=%zu systemMallocInUseK=%zu systemMallocFreeK=%zu systemMallocMappedK=%zu skiaResourceCacheK=%zu skiaFontCacheK=%zu",
+                        getpid(), heapPagesReleased / 1024, systemMalloc.arena / 1024, systemMalloc.uordblks / 1024, systemMalloc.fordblks / 1024, systemMalloc.hblkhd / 1024,
+                        SkGraphics::GetResourceCacheTotalBytesUsed() / 1024, SkGraphics::GetFontCacheUsed() / 1024);
                     WTFLogAlways("WPE_HIDDEN_TRIM pid=%d freedK=%lld footprintK=%zu allocatorAllocatedK=%zu allocatorCommittedK=%zu jsHeapK=%zu jsCapacityK=%zu jsExtraK=%zu jsObjects=%zu jitK=%zu imagesK=%d imagesDecodedK=%d scriptsK=%d scriptsDecodedK=%d cssK=%d fontsK=%d documents=%u",
                         getpid(), static_cast<long long>((static_cast<int64_t>(footprintBefore) - static_cast<int64_t>(footprint)) / 1024), footprint / 1024,
                         allocated / 1024, committed / 1024, vm->heap.size() / 1024, vm->heap.capacity() / 1024, vm->heap.extraMemorySize() / 1024, vm->heap.objectCount(),
