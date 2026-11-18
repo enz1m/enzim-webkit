@@ -203,6 +203,18 @@ MonotonicTime WindowEventLoop::computeIdleDeadline()
 std::optional<MonotonicTime> WindowEventLoop::nextScheduledWorkTime() const
 {
     auto timerTime = nextTimerFireTime();
+#if PLATFORM(WPE)
+    static const bool includeCoreTimers = [] {
+        const char* value = getenv("WPE_IDLE_CORE_TIMERS");
+        return !value || *value != '0';
+    }();
+    if (includeCoreTimers) {
+        auto& timers = threadGlobalDataSingleton().threadTimers().timerHeap();
+        // Load completion and other native timers share the main thread with idle work.
+        if (!timers.isEmpty() && (!timerTime || timers.first()->time < *timerTime))
+            timerTime = timers.first()->time;
+    }
+#endif
     auto renderingTime = nextRenderingTime();
     if (!timerTime)
         return renderingTime;

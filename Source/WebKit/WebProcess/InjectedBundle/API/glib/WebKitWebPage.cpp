@@ -55,6 +55,7 @@
 #include <WebCore/HTTPStatusCodes.h>
 #include <WebCore/LocalFrameInlines.h>
 #include <WebCore/LocalFrameView.h>
+#include <WebCore/NavigationScheduler.h>
 #include <glib/gi18n-lib.h>
 #include <wtf/HashMap.h>
 #include <wtf/NeverDestroyed.h>
@@ -791,6 +792,25 @@ ALLOW_DEPRECATED_DECLARATIONS_END
         G_TYPE_BOOLEAN, 1,
         WEBKIT_TYPE_USER_MESSAGE);
 }
+
+#if PLATFORM(WPE)
+extern "C" WEBKIT_API gboolean webkit_web_page_enzui_document_ready_v1(WebKitWebPage* webPage)
+{
+    g_return_val_if_fail(WEBKIT_IS_WEB_PAGE(webPage), FALSE);
+    if (!webPage->priv->webPage)
+        return FALSE;
+    RefPtr frame = webPage->priv->webPage->mainWebFrame().coreLocalFrame();
+    if (!frame)
+        return FALSE;
+    RefPtr document = frame->document();
+    if (!document || document->readyState() != Document::ReadyState::Complete || !document->loadEventFinished() || document->processingLoadEvent())
+        return FALSE;
+    // A completed old document may already be handing off to its replacement.
+    if (frame->navigationScheduler().hasQueuedNavigation() || frame->loader().policyDocumentLoader() || frame->loader().provisionalDocumentLoader())
+        return FALSE;
+    return TRUE;
+}
+#endif
 
 WebPage* webkitWebPageGetPage(WebKitWebPage *webPage)
 {
