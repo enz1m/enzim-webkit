@@ -159,6 +159,11 @@ RefPtr<WebPageProxy> WebInspectorUIProxy::platformCreateFrontendPage()
     return page;
 }
 
+WPEView* WebInspectorUIProxy::frontendWPEView() const
+{
+    return m_inspectorView ? m_inspectorView->wpeView() : nullptr;
+}
+
 void WebInspectorUIProxy::platformCreateFrontendWindow()
 {
     wpe_toplevel_resize(m_inspectorWindow.get(), initialWindowWidth, initialWindowHeight);

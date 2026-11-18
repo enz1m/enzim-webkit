@@ -169,6 +169,11 @@ public:
     static void showSavePanelForSingleFile(HWND, Vector<WebCore::InspectorFrontendClient::SaveData>&&);
 #endif
 
+#if PLATFORM(WPE) && ENABLE(WPE_PLATFORM)
+    // The local frontend's view while it is open, for embedders that present it themselves.
+    WPEView* frontendWPEView() const;
+#endif
+
 #if PLATFORM(GTK)
     GtkWidget* inspectorView() const { return m_inspectorView.get(); };
     void setClient(std::unique_ptr<WebInspectorUIProxyClient>&&);

@@ -300,6 +300,32 @@ guint createShowOptionMenuSignal(WebKitWebViewClass* webViewClass)
  *
  * Since: 2.46
  */
+// Open or close the local inspector, returning whether it is open. Unlike the
+// toggle, repeating a request is idempotent.
+extern "C" WEBKIT_API gboolean webkit_web_view_enzui_set_inspector_visible_v1(WebKitWebView* webView, gboolean visible)
+{
+    g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), FALSE);
+    auto& page = webkitWebViewGetPage(webView);
+    RefPtr inspector = page.wpeView() ? page.inspector() : nullptr;
+    if (!inspector)
+        return FALSE;
+    if (visible && !inspector->isVisible())
+        inspector->show();
+    else if (!visible && inspector->isVisible())
+        inspector->close();
+    return inspector->isVisible();
+}
+
+// The open local inspector frontend's view, or NULL. The embedder presents it and
+// routes its input; the pointer is invalid once this returns a different value.
+extern "C" WEBKIT_API WPEView* webkit_web_view_enzui_get_inspector_view_v1(WebKitWebView* webView)
+{
+    g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), nullptr);
+    auto& page = webkitWebViewGetPage(webView);
+    RefPtr inspector = page.wpeView() ? page.inspector() : nullptr;
+    return inspector ? inspector->frontendWPEView() : nullptr;
+}
+
 void webkit_web_view_toggle_inspector(WebKitWebView* webView)
 {
     g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));

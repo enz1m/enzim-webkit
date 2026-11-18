@@ -94,6 +94,11 @@ WebProcessPool& defaultInspectorProcessPool(unsigned inspectionLevel)
     if (!pool) {
         auto configuration = API::ProcessPoolConfiguration::create();
         pool = &WebProcessPool::create(configuration.get()).leakRef();
+#if PLATFORM(GTK) || PLATFORM(WPE)
+        // Embedder pools enable the sandbox in WebKitWebContext, which this pool
+        // bypasses; without this the inspector's web process ran unconfined.
+        pool->setSandboxEnabled(true);
+#endif
         prepareProcessPoolForInspector(*pool);
     }
     return *pool;

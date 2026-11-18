@@ -49,13 +49,18 @@
 #include <WebCore/ContextMenuContext.h>
 #include <WebCore/Document.h>
 #include <WebCore/DocumentLoader.h>
+#include <WebCore/DocumentPage.h>
+#include <WebCore/DocumentView.h>
+#include <WebCore/EventHandler.h>
 #include <WebCore/FrameDestructionObserver.h>
 #include <WebCore/FrameLoader.h>
 #include <WebCore/HTMLFormElement.h>
 #include <WebCore/HTTPStatusCodes.h>
+#include <WebCore/HitTestResult.h>
 #include <WebCore/LocalFrameInlines.h>
 #include <WebCore/LocalFrameView.h>
 #include <WebCore/NavigationScheduler.h>
+#include <WebCore/PageInspectorController.h>
 #include <glib/gi18n-lib.h>
 #include <wtf/HashMap.h>
 #include <wtf/NeverDestroyed.h>
@@ -812,6 +817,29 @@ extern "C" WEBKIT_API gboolean webkit_web_page_enzui_document_ready_v1(WebKitWeb
     // A completed old document may already be handing off to its replacement.
     if (frame->navigationScheduler().hasQueuedNavigation() || frame->loader().policyDocumentLoader() || frame->loader().provisionalDocumentLoader())
         return FALSE;
+    return TRUE;
+}
+#endif
+
+#if PLATFORM(WPE)
+// Inspect the element at a view point, as the context menu's Inspect Element does.
+// Opens the inspector when developer extras are enabled; FALSE when nothing is there.
+extern "C" WEBKIT_API gboolean webkit_web_page_enzui_inspect_element_at_v1(WebKitWebPage* webPage, double x, double y)
+{
+    g_return_val_if_fail(WEBKIT_IS_WEB_PAGE(webPage), FALSE);
+    if (!webPage->priv->webPage)
+        return FALSE;
+    RefPtr frame = webPage->priv->webPage->mainWebFrame().coreLocalFrame();
+    RefPtr view = frame ? frame->view() : nullptr;
+    RefPtr page = frame ? frame->page() : nullptr;
+    if (!view || !page)
+        return FALSE;
+    auto point = view->windowToContents(roundedIntPoint(FloatPoint(x, y)));
+    auto result = frame->eventHandler().hitTestResultAtPoint(point, { HitTestRequest::Type::ReadOnly, HitTestRequest::Type::Active });
+    RefPtr node = result.innerNonSharedNode();
+    if (!node)
+        return FALSE;
+    page->inspectorController().inspect(node.get());
     return TRUE;
 }
 #endif
