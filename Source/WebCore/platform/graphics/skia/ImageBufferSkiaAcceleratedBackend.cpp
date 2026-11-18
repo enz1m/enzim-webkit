@@ -40,12 +40,15 @@
 #include "SkiaCanvasPolicy.h"
 #include "SkiaRecordingResult.h"
 #include "SkiaUtilities.h"
+#include <atomic>
 #include <wtf/DataLog.h>
+#include <wtf/SetForScope.h>
 #include <wtf/text/StringView.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkPixmap.h>
 #include <skia/gpu/ganesh/GrBackendSurface.h>
 #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
+#include <skia/private/chromium/GrSurfaceCharacterization.h>
 #include <skia/utils/SkNWayCanvas.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #include <wtf/TZoneMallocInlines.h>
@@ -97,6 +100,24 @@ static inline bool shouldEnableDynamicMSAA()
     return enableDynamicMSAA;
 }
 
+static bool shouldUseAnalyticCanvasAA()
+{
+    static const bool enabled = [] {
+        if (const char* value = getenv("WPE_CANVAS_ANALYTIC_AA"))
+            return *value != '0';
+#if PLATFORM(WPE)
+        if (const char* sampleCount = getenv("WEBKIT_SKIA_MSAA_SAMPLE_COUNT"); sampleCount && *sampleCount)
+            return false;
+        if (getenv("WEBKIT_SKIA_ENABLE_DYNAMIC_MSAA"))
+            return false;
+        return defaultEnableDynamicCanvasMSAA();
+#else
+        return false;
+#endif
+    }();
+    return enabled;
+}
+
 std::unique_ptr<ImageBufferSkiaAcceleratedBackend> ImageBufferSkiaAcceleratedBackend::create(const ImageBufferParameters& parameters, const ImageBufferCreationContext& creationContext)
 {
     IntSize backendSize = calculateSafeBackendSize(parameters);
@@ -122,7 +143,9 @@ std::unique_ptr<ImageBufferSkiaAcceleratedBackend> ImageBufferSkiaAcceleratedBac
     auto imageInfo = SkImageInfo::Make(backendSize.width(), backendSize.height(), kRGBA_8888_SkColorType, kPremul_SkAlphaType, parameters.colorSpace.platformColorSpace());
     auto msaaSampleCount = PlatformDisplay::sharedDisplay().msaaSampleCount();
     uint32_t flags = 0;
-    if (parameters.purpose == RenderingPurpose::Canvas && msaaSampleCount && shouldEnableDynamicMSAA()) {
+    if (parameters.purpose == RenderingPurpose::Canvas && shouldUseAnalyticCanvasAA())
+        msaaSampleCount = 0;
+    else if (parameters.purpose == RenderingPurpose::Canvas && msaaSampleCount && shouldEnableDynamicMSAA()) {
         flags |= SkSurfaceProps::kDynamicMSAA_Flag;
         msaaSampleCount = 1;
     }
@@ -241,6 +264,10 @@ void ImageBufferSkiaAcceleratedBackend::replayCanvasRecordingContextIfNeeded()
     m_hasActiveRecording = false;
 }
 
+#if USE(COORDINATED_GRAPHICS)
+static thread_local bool tracingCanvasPreparation;
+#endif
+
 void ImageBufferSkiaAcceleratedBackend::flushContext()
 {
     replayCanvasRecordingContextIfNeeded();
@@ -254,18 +281,41 @@ void ImageBufferSkiaAcceleratedBackend::flushContext()
 
     ASSERT(grContext == PlatformDisplay::sharedDisplay().skiaGrContext());
     grContext->flushAndSubmit(m_surface.get(), GrSyncCpu::kNo);
+#if USE(COORDINATED_GRAPHICS)
+    static std::atomic<unsigned> traces { 0 };
+    auto count = tracingCanvasPreparation ? traces.load(std::memory_order_relaxed) : 32;
+    if (count < 32 && traces.compare_exchange_strong(count, count + 1, std::memory_order_relaxed))
+        dataLogLn("WPE canvas eager submit executed");
+#endif
 }
 
 void ImageBufferSkiaAcceleratedBackend::prepareForDisplay()
 {
+#if USE(COORDINATED_GRAPHICS)
+    static const bool tracePreparation = StringView::fromLatin1(getenv("WPE_CANVAS_DEFER_SUBMIT_TRACE")) == "1"_s;
+    SetForScope preparingScope(tracingCanvasPreparation, tracePreparation && purpose() == RenderingPurpose::Canvas);
+#endif
+#if USE(COORDINATED_GRAPHICS) && !USE(TEXTURE_MAPPER)
+    auto threadSafeGrContext = m_layerContentsDisplayDelegate ? m_layerContentsDisplayDelegate->threadSafeGrContext() : nullptr;
+    static const bool coalescingEnabled = [] {
+        if (const char* value = getenv("WPE_CANVAS_DEFER_SUBMIT"))
+            return *value != '0';
+#if PLATFORM(WPE)
+        return true;
+#else
+        return false;
+#endif
+    }();
+    // Promise-image creation submits all pending work and fences it before cross-context use.
+    bool coalesceSubmission = coalescingEnabled && threadSafeGrContext;
+    if (!coalesceSubmission)
+        flushContext();
+#else
     flushContext();
+#endif
 
 #if USE(COORDINATED_GRAPHICS)
     if (!m_layerContentsDisplayDelegate)
-        return;
-
-    auto image = createNativeImageReference();
-    if (!image)
         return;
 
     auto* grContext = this->grContext();
@@ -277,12 +327,29 @@ void ImageBufferSkiaAcceleratedBackend::prepareForDisplay()
 
     ASSERT(grContext == PlatformDisplay::sharedDisplay().skiaGrContext());
 
+    auto image = createNativeImageReference();
+    if (!image) {
+#if !USE(TEXTURE_MAPPER)
+        if (coalesceSubmission)
+            flushContext();
+#endif
+        return;
+    }
+
 #if USE(TEXTURE_MAPPER)
     m_layerContentsDisplayDelegate->setDisplayBuffer(CoordinatedPlatformLayerBufferNativeImage::create(image.releaseNonNull(),
         SkiaUtilities::flushAndSubmitSurfaceWithFence(grContext, m_surface.get())));
 #else
-    if (auto threadSafeGrContext = m_layerContentsDisplayDelegate->threadSafeGrContext())
+    if (threadSafeGrContext) {
+        if (coalesceSubmission && !image->platformImage()->isTextureBacked())
+            flushContext();
         m_layerContentsDisplayDelegate->setDisplayBuffer(CoordinatedPlatformLayerBufferSkiaImage::create(image->platformImage(), threadSafeGrContext));
+        static const bool trace = StringView::fromLatin1(getenv("WPE_CANVAS_DEFER_SUBMIT_TRACE")) == "1"_s;
+        static std::atomic<unsigned> traces { 0 };
+        auto count = trace ? traces.load(std::memory_order_relaxed) : 32;
+        if (count < 32 && traces.compare_exchange_strong(count, count + 1, std::memory_order_relaxed))
+            dataLogLn("WPE canvas prepare coalesced=", coalesceSubmission, " texture=", image->platformImage()->isTextureBacked());
+    }
 #endif
 
     // Re-enable recording mode for subsequent drawing operations.
@@ -319,7 +386,13 @@ RefPtr<NativeImage> ImageBufferSkiaAcceleratedBackend::createNativeImageReferenc
     // because that call doesn't force the MSAA resolution, which can produce outdated results
     // in the resulting SkImage.
     auto& display = PlatformDisplay::sharedDisplay();
-    if (grContext && display.msaaSampleCount() > 0 && display.skiaGLContext()->makeContextCurrent()) {
+    bool needsResolve = display.msaaSampleCount() > 0;
+    if (needsResolve && purpose() == RenderingPurpose::Canvas && shouldUseAnalyticCanvasAA()) {
+        GrSurfaceCharacterization characterization;
+        if (m_surface->characterize(&characterization) && characterization.sampleCount() <= 1 && !(m_surface->props().flags() & SkSurfaceProps::kDynamicMSAA_Flag))
+            needsResolve = false;
+    }
+    if (grContext && needsResolve && display.skiaGLContext()->makeContextCurrent()) {
         ASSERT(grContext == display.skiaGrContext());
         grContext->flush(m_surface.get());
     }
