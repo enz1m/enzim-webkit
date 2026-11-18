@@ -284,7 +284,7 @@ private:
     SingleCharMap m_singleCharMap;
     Map m_map;
     OutOfLineMap m_outOfLineMap;
-    bool m_hasSeenIdeograph;
+    bool m_hasSeenIdeograph { false };
 };
 
 } // namespace WebCore

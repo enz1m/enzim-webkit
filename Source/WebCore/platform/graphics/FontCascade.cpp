@@ -472,7 +472,7 @@ GlyphData FontCascade::glyphDataForCharacter(char32_t c, bool mirror, FontVarian
     if (mirror)
         c = u_charMirror(c);
 
-    auto emojiPolicy = resolvedEmojiPolicy.value_or(resolveEmojiPolicy(m_fontDescription.variantEmoji(), c));
+    auto emojiPolicy = resolvedEmojiPolicy ? *resolvedEmojiPolicy : resolveEmojiPolicy(m_fontDescription.variantEmoji(), c);
 
     SUPPRESS_UNCOUNTED_ARG return fonts()->glyphDataForCharacter(c, m_fontDescription, fontSelector(), variant, emojiPolicy);
 }

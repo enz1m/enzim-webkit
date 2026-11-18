@@ -31,6 +31,12 @@
  */
 
 #include "config.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <utility>
 #include "CanvasRenderingContext2DBase.h"
 
 #include "ApplyImageDevicePixelRatio.h"
@@ -3299,10 +3305,39 @@ String CanvasRenderingContext2DBase::normalizeSpaces(const String& text)
     return createStringByNormalizingSpaces(text.span16(), indexOfFirstSpace);
 }
 
+#if PLATFORM(WPE) && USE(SKIA)
+static void traceASCIICanvasCachedDraw(bool blob, size_t glyphs)
+{
+    static const bool traceShaping = std::getenv("WPE_ASCII_CANVAS_SHAPING_TRACE");
+    static const bool traceBlobs = std::getenv("WPE_ASCII_CANVAS_BLOBS_TRACE");
+    if (!(blob ? traceBlobs : traceShaping))
+        return;
+    static std::atomic<unsigned> shapingCount { 0 };
+    static std::atomic<unsigned> blobCount { 0 };
+    auto& counter = blob ? blobCount : shapingCount;
+    auto count = counter.load(std::memory_order_relaxed);
+    if (count < 32 && counter.compare_exchange_strong(count, count + 1, std::memory_order_relaxed))
+        std::fprintf(stderr, "WPE ASCII canvas cached draw: blob=%d glyphs=%zu\n", blob, glyphs);
+}
+#endif
+
 static bool canUseCachedShapedText(const TextRun& textRun)
 {
 #if PLATFORM(COCOA)
     return textRun.ltr() && !Layout::TextUtil::containsStrongDirectionalityText(textRun.text());
+#elif PLATFORM(WPE) && USE(SKIA)
+    static const bool enabled = [] {
+        auto* value = std::getenv("WPE_ASCII_CANVAS_SHAPING");
+        return !value || value[0] != '0';
+    }();
+    if (!enabled || !textRun.ltr() || textRun.directionalOverride() || textRun.length() > ShapedTextCacheDefaults::maxTextLength)
+        return false;
+    // Printable ASCII has no bidi controls or context-dependent script segmentation.
+    for (auto character : textRun.text().codeUnits()) {
+        if (character < 0x20 || character > 0x7e)
+            return false;
+    }
+    return true;
 #else
     UNUSED_PARAM(textRun);
     // FIXME: Shaped text caching is currently limited to Apple (COCOA) platforms due to potential
@@ -3321,7 +3356,12 @@ void CanvasRenderingContext2DBase::drawTextUnchecked(const TextRun& textRun, dou
         CheckedRef fontCascade = fontProxy()->fontCascade();
         RefPtr fonts = fontCascade->fonts();
         ASSERT(fonts);
-        return fonts->getOrCreateCachedShapedText(textRun, fontCascade, 0, std::nullopt, ForTextEmphasis::No);
+        auto* cached = fonts->getOrCreateCachedShapedText(textRun, fontCascade, 0, std::nullopt, ForTextEmphasis::No);
+#if PLATFORM(WPE) && USE(SKIA)
+        if (cached)
+            traceASCIICanvasCachedDraw(false, cached->textShapingResult.glyphBuffer.size());
+#endif
+        return cached;
     }();
 
     float fontWidth = cachedShapedText ? cachedShapedText->textShapingResult.width : protect(fontProxy()->fontCascade())->width(textRun);
@@ -3348,11 +3388,37 @@ void CanvasRenderingContext2DBase::drawTextUnchecked(const TextRun& textRun, dou
 
     auto* c = effectiveDrawingContext();
 
+#if PLATFORM(WPE) && USE(SKIA)
+    static const bool reuseTextBlobs = [] {
+        auto* value = std::getenv("WPE_ASCII_CANVAS_BLOBS");
+        return !value || value[0] != '0';
+    }();
+    // Shader paints use canvas coordinates, so glyph-origin translation cannot replay them.
+    const auto& canvasPaint = fill ? state().fillStyle : state().strokeStyle;
+    const bool reuseCanvasDisplayLists = reuseTextBlobs && c->hasPlatformContext() && !canvasPaint.isGradientOrPattern();
+#else
+    constexpr bool reuseCanvasDisplayLists = true;
+#endif
+    auto shouldRetainCanvasDisplayList = [&] {
+#if PLATFORM(WPE) && USE(SKIA)
+        return std::exchange(cachedShapedText->hasDrawnCanvasText, true);
+#else
+        return true;
+#endif
+    };
     bool cachedDisplayListNeedsStateSave = false;
     // Any shadow could add display list items to draw glyphs a 2nd time with different context attributes.
-    if (cachedShapedText && !cachedShapedText->displayList && !cachedShapedText->textShapingResult.glyphBuffer.isEmpty() && !c->dropShadow()) {
+    if (reuseCanvasDisplayLists && cachedShapedText && !cachedShapedText->displayList && !cachedShapedText->textShapingResult.glyphBuffer.isEmpty() && !c->dropShadow() && shouldRetainCanvasDisplayList()) {
         cachedShapedText->displayList = protect(fontProxy()->fontCascade())->displayListForGlyphBuffer(*c, cachedShapedText->textShapingResult.glyphBuffer, FontCascade::CustomFontNotReadyAction::UseFallbackIfFontNotReady);
 
+#if PLATFORM(WPE) && USE(SKIA)
+        // A glyph-only list replays the current paint state; captured state changes are ineligible.
+        if (cachedShapedText->displayList) {
+            auto items = cachedShapedText->displayList->items();
+            if (items.size() > 16 || std::ranges::any_of(items, [](const auto& item) { return !std::holds_alternative<DisplayList::DrawTextBlob>(item); }))
+                cachedShapedText->displayList = nullptr;
+        }
+#endif
         if (cachedShapedText->displayList) {
             for (auto& item : cachedShapedText->displayList->items()) {
                 if (std::holds_alternative<DisplayList::SetInlineFillColor>(item)
@@ -3368,7 +3434,10 @@ void CanvasRenderingContext2DBase::drawTextUnchecked(const TextRun& textRun, dou
         if (cachedShapedText) {
             const auto& glyphBuffer = cachedShapedText->textShapingResult.glyphBuffer;
             if (!cachedShapedText->textShapingResult.glyphBuffer.isEmpty()) {
-                if (cachedShapedText->displayList && !context.hasDropShadow()) {
+                if (reuseCanvasDisplayLists && cachedShapedText->displayList && !context.hasDropShadow()) {
+#if PLATFORM(WPE) && USE(SKIA)
+                    traceASCIICanvasCachedDraw(true, glyphBuffer.size());
+#endif
                     if (cachedDisplayListNeedsStateSave) {
                         GraphicsContextStateSaver stateSaver(context);
                         context.translate(point);

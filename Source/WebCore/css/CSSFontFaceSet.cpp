@@ -202,11 +202,8 @@ void CSSFontFaceSet::addToFacesLookupTable(CSSFontFace& face)
 
 void CSSFontFaceSet::add(CSSFontFace& face)
 {
+    Ref protectedThis { *this };
     ASSERT(!hasFace(face));
-
-    m_fontModifiedObservers.forEach([] (auto& observer) {
-        observer();
-    });
 
     face.addClient(*this);
     m_cache.clear();
@@ -225,6 +222,11 @@ void CSSFontFaceSet::add(CSSFontFace& face)
         ASSERT(!m_constituentCSSConnections.contains(face.cssConnection()));
         m_constituentCSSConnections.add(face.cssConnection(), &face);
     }
+    // Invalidation clients must resolve against the updated face lookup tables.
+    m_fontModifiedObservers.forEach([] (auto& observer) {
+        observer();
+    });
+
 }
 
 void CSSFontFaceSet::removeFromFacesLookupTable(const CSSFontFace& face, const CSSValue& familyToSearchFor)

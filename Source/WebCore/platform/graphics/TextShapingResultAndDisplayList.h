@@ -31,6 +31,9 @@ struct TextShapingResultAndDisplayList {
 public:
     TextShapingResult textShapingResult;
     RefPtr<const DisplayList::DisplayList> displayList;
+#if PLATFORM(WPE) && USE(SKIA)
+    bool hasDrawnCanvasText { false };
+#endif
 };
 
 } // namespace WebCore
