@@ -29,6 +29,7 @@
 #include "Font.h"
 #include "FontCustomPlatformData.h"
 #include "FontDescription.h"
+#include "FontVariationsSkia.h"
 #include "StyleFontSizeFunctions.h"
 #include <wtf/Assertions.h>
 #include <wtf/text/CString.h>
@@ -253,7 +254,6 @@ Vector<hb_feature_t> FontCache::computeFeatures(const FontDescription& fontDescr
 
     // 1. Font features enabled by default, including features required for a given script.
 
-    // FIXME: optical sizing.
 
     // 2. If the font is defined via an @font-face rule, the font features implied by the
     //    font-feature-settings descriptor in the @font-face rule.
@@ -421,15 +421,27 @@ std::unique_ptr<FontPlatformData> FontCache::createFontPlatformData(const FontDe
     if (!typeface)
         return nullptr;
 
+    auto defaultValues = defaultFontVariationValues(*typeface);
+    auto createPlatformData = [&](float size) {
+        auto selectedTypeface = typeface;
+        if (auto opticalSize = opticalSizingValue(defaultValues, fontDescription, size)) {
+            SkFontArguments::VariationPosition::Coordinate coordinate { SkSetFourByteTag('o', 'p', 's', 'z'), *opticalSize };
+            SkFontArguments arguments;
+            arguments.setVariationDesignPosition({ &coordinate, 1 });
+            if (auto opticalTypeface = selectedTypeface->makeClone(arguments))
+                selectedTypeface = WTF::move(opticalTypeface);
+        }
+        auto features = computeFeatures(fontDescription, fontCreationContext);
+        auto [syntheticBold, syntheticOblique] = computeSynthesisProperties(*selectedTypeface, fontDescription, options);
+        return FontPlatformData(WTF::move(selectedTypeface), size, syntheticBold, syntheticOblique, fontDescription.orientation(), fontDescription.widthVariant(), fontDescription.textRenderingMode(), WTF::move(features), fontCreationContext.metricsOverrides());
+    };
+
     auto size = fontDescription.adjustedSizeForFontFace(fontCreationContext.sizeAdjust());
-    auto features = computeFeatures(fontDescription, fontCreationContext);
-    auto [syntheticBold, syntheticOblique] = computeSynthesisProperties(*typeface, fontDescription, options);
-    FontPlatformData platformData(WTF::move(typeface), size, syntheticBold, syntheticOblique, fontDescription.orientation(), fontDescription.widthVariant(), fontDescription.textRenderingMode(), WTF::move(features), fontCreationContext.metricsOverrides());
-
+    auto platformData = createPlatformData(size);
     platformData.updateSizeWithFontSizeAdjust(fontDescription.fontSizeAdjust(), fontDescription.usedSize());
-    auto platformDataUniquePtr = makeUnique<FontPlatformData>(platformData);
-
-    return platformDataUniquePtr;
+    if (platformData.size() != size && opticalSizingValue(defaultValues, fontDescription, size) != opticalSizingValue(defaultValues, fontDescription, platformData.size()))
+        return makeUnique<FontPlatformData>(createPlatformData(platformData.size()));
+    return makeUnique<FontPlatformData>(platformData);
 }
 
 ASCIILiteral FontCache::platformAlternateFamilyName(const String&)

@@ -31,11 +31,15 @@
 #include "EncodedImageGenerator.h"
 #include "FontCache.h"
 #include "SharedBuffer.h"
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <wtf/NeverDestroyed.h>
 
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkColorSpace.h>
 #include <skia/core/SkData.h>
+#include <skia/core/SkFontArguments.h>
 #include <skia/core/SkFontMgr.h>
 #include <skia/core/SkPixmap.h>
 #include <skia/core/SkSerialProcs.h>
@@ -49,7 +53,10 @@ namespace WebCore {
 // Each image or typeface entry starts with its identifier and what payload
 // follows, if any: an image's pixels or a typeface's font data, or an
 // image's encoded data.
-enum class Payload : uint8_t { None, Data, Encoded };
+// A full-width tag keeps padding out of the wire header.
+enum class Payload : uint32_t { None, Data, Encoded, TypefaceDataReset };
+
+constexpr size_t typefaceCacheCapacity = 128;
 
 struct EntryHeader {
     uint32_t identifier;
@@ -183,14 +190,29 @@ Vector<uint8_t> SkiaPictureSerializer::serialize(const SkPicture& picture)
     procs.fTypefaceProc = [](SkTypeface* typeface, void* context) -> SkSerialReturnType {
         auto& serializer = *static_cast<SkiaPictureSerializer*>(context);
         assertIsHeld(serializer.m_lock);
+        if (!serializer.m_sentTypefaces.contains(typeface->uniqueID()) && serializer.m_sentTypefaces.size() >= typefaceCacheCapacity)
+            serializer.m_sentTypefaces.clear();
+        bool resetsCache = serializer.m_sentTypefaces.isEmpty();
         bool isNew = serializer.m_sentTypefaces.add(typeface->uniqueID()).isNewEntry;
         SkDynamicMemoryWStream stream;
-        EntryHeader entry { typeface->uniqueID(), isNew ? Payload::Data : Payload::None };
+        EntryHeader entry { typeface->uniqueID(), resetsCache ? Payload::TypefaceDataReset : isNew ? Payload::Data : Payload::None };
         stream.write(&entry, sizeof(entry));
-        // Installed fonts travel as descriptors the GPU process matches
-        // itself; web fonts carry their data.
-        if (isNew)
+        if (isNew) {
+            Vector<SkFontArguments::VariationPosition::Coordinate> coordinates;
+            auto count = typeface->getVariationDesignPosition({ });
+            if (count > 0 && count <= std::numeric_limits<uint16_t>::max()) {
+                coordinates.grow(count);
+                if (typeface->getVariationDesignPosition(coordinates.mutableSpan()) != count)
+                    coordinates.clear();
+            }
+            // Descriptor-only serialization drops installed fonts' variation coordinates.
+            stream.write32(static_cast<uint32_t>(coordinates.size()));
+            for (auto& coordinate : coordinates) {
+                stream.write32(coordinate.axis);
+                stream.writeScalar(coordinate.value);
+            }
             typeface->serialize(&stream, SkTypeface::SerializeBehavior::kIncludeDataIfLocal);
+        }
         return stream.detachAsData();
     };
 
@@ -310,9 +332,42 @@ sk_sp<SkPicture> SkiaPictureDeserializer::deserialize(std::span<const uint8_t> d
             return nullptr;
         if (entry.payload == Payload::None)
             return deserializer.m_typefaces.get(entry.identifier);
+        // OpenType stores its axis count in a uint16; bound the untrusted allocation.
+        uint32_t count;
+        bool resetsCache = entry.payload == Payload::TypefaceDataReset;
+        if ((entry.payload != Payload::Data && !resetsCache) || !stream.readU32(&count) || count > std::numeric_limits<uint16_t>::max())
+            return nullptr;
+        if (!resetsCache && deserializer.m_typefaces.size() >= typefaceCacheCapacity && !deserializer.m_typefaces.contains(entry.identifier))
+            return nullptr;
+        Vector<SkFontArguments::VariationPosition::Coordinate> coordinates;
+        coordinates.reserveInitialCapacity(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            SkFontArguments::VariationPosition::Coordinate coordinate;
+            if (!stream.readU32(&coordinate.axis) || !stream.readScalar(&coordinate.value) || !std::isfinite(coordinate.value))
+                return nullptr;
+            coordinates.append(coordinate);
+        }
         auto typeface = SkTypeface::MakeDeserialize(&stream, sk_ref_sp(&FontCache::forCurrentThread().fontManager()));
-        if (typeface)
-            deserializer.m_typefaces.set(entry.identifier, typeface);
+        if (!typeface)
+            return nullptr;
+        if (!coordinates.isEmpty()) {
+            Vector<SkFontArguments::VariationPosition::Coordinate> current(coordinates.size());
+            bool matches = typeface->getVariationDesignPosition(current.mutableSpan()) == static_cast<int>(coordinates.size())
+                && std::ranges::equal(current, coordinates, [](const auto& a, const auto& b) {
+                    return a.axis == b.axis && a.value == b.value;
+                });
+            if (!matches) {
+                SkFontArguments arguments;
+                arguments.setVariationDesignPosition({ coordinates.span().data(), static_cast<int>(coordinates.size()) });
+                typeface = typeface->makeClone(arguments);
+                if (!typeface)
+                    return nullptr;
+            }
+        }
+        // Reset both ends together; live pictures retain their own typeface references.
+        if (resetsCache)
+            deserializer.m_typefaces.clear();
+        deserializer.m_typefaces.set(entry.identifier, typeface);
         return typeface;
     };
     return SkPicture::MakeFromData(data.data(), data.size(), &procs);

@@ -49,4 +49,19 @@ FontVariationDefaultsMap defaultFontVariationValues(const SkTypeface& typeface)
     return map;
 }
 
+std::optional<float> opticalSizingValue(const FontVariationDefaultsMap& axes, const FontDescription& description, float adjustedSize)
+{
+    auto axis = axes.find(FontVariationAxisTag::opsz);
+    if (axis == axes.end())
+        return std::nullopt;
+
+    float value = description.opticalSizing() == FontOpticalSizing::Auto
+        ? adjustedSize : axis->value.defaultValue;
+    for (auto& variation : description.variationSettings()) {
+        if (variation.tag() == FontVariationAxisTag::opsz)
+            value = variation.value();
+    }
+    return axis->value.clamp(value);
+}
+
 } // namespace WebCore

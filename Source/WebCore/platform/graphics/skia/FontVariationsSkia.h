@@ -47,5 +47,6 @@ struct FontVariationDefaults {
 
 using FontVariationDefaultsMap = HashMap<FontTag, FontVariationDefaults, FourCharacterTagHash, FourCharacterTagHashTraits>;
 FontVariationDefaultsMap defaultFontVariationValues(const SkTypeface&);
+std::optional<float> opticalSizingValue(const FontVariationDefaultsMap&, const FontDescription&, float adjustedSize);
 
 } // namespace WebCore

@@ -46,56 +46,65 @@ FontCustomPlatformData::~FontCustomPlatformData() = default;
 
 FontPlatformData FontCustomPlatformData::fontPlatformData(const FontDescription& description, const FontCreationContext& fontCreationContext)
 {
-    sk_sp<SkTypeface> typeface = m_typeface;
+    auto defaultValues = defaultFontVariationValues(*m_typeface);
+    auto createPlatformData = [&](float size) {
+        sk_sp<SkTypeface> typeface = m_typeface;
+        bool hasWeightVariationAxis = defaultValues.contains(FontVariationAxisTag::wght);
+        bool hasSlopeVariationAxis = defaultValues.contains(FontVariationAxisTag::slnt) || defaultValues.contains(FontVariationAxisTag::ital);
+        if (!defaultValues.isEmpty()) {
+            Vector<SkFontArguments::VariationPosition::Coordinate> variationsToBeApplied;
+            auto applyVariation = [&](const FontTag& tag, float value) {
+                auto iterator = defaultValues.find(tag);
+                if (iterator == defaultValues.end())
+                    return;
 
-    auto defaultValues = defaultFontVariationValues(*typeface);
-    bool hasWeightVariationAxis = defaultValues.contains(FontVariationAxisTag::wght);
-    bool hasSlopeVariationAxis = defaultValues.contains(FontVariationAxisTag::slnt) || defaultValues.contains(FontVariationAxisTag::ital);
-    if (!defaultValues.isEmpty()) {
-        Vector<SkFontArguments::VariationPosition::Coordinate> variationsToBeApplied;
-        auto applyVariation = [&](const FontTag& tag, float value) {
-            auto iterator = defaultValues.find(tag);
-            if (iterator == defaultValues.end())
-                return;
+                variationsToBeApplied.append({ SkSetFourByteTag(tag[0], tag[1], tag[2], tag[3]), iterator->value.clamp(value) });
+            };
 
-            variationsToBeApplied.append({ SkSetFourByteTag(tag[0], tag[1], tag[2], tag[3]), iterator->value.clamp(value) });
-        };
+            float weight = description.weight();
+            if (auto weightValue = fontCreationContext.fontFaceCapabilities().weight)
+                weight = std::max(std::min(weight, static_cast<float>(weightValue->maximum)), static_cast<float>(weightValue->minimum));
+            applyVariation(FontVariationAxisTag::wght, weight);
 
-        float weight = description.weight();
-        if (auto weightValue = fontCreationContext.fontFaceCapabilities().weight)
-            weight = std::max(std::min(weight, static_cast<float>(weightValue->maximum)), static_cast<float>(weightValue->minimum));
-        applyVariation(FontVariationAxisTag::wght, weight);
+            float width = description.width();
+            if (auto widthValue = fontCreationContext.fontFaceCapabilities().width)
+                width = std::max(std::min(width, static_cast<float>(widthValue->maximum)), static_cast<float>(widthValue->minimum));
+            applyVariation(FontVariationAxisTag::wdth, width);
 
-        float width = description.width();
-        if (auto widthValue = fontCreationContext.fontFaceCapabilities().width)
-            width = std::max(std::min(width, static_cast<float>(widthValue->maximum)), static_cast<float>(widthValue->minimum));
-        applyVariation(FontVariationAxisTag::wdth, width);
+            if (variationStyleAxis(description, fontCreationContext.fontFaceCapabilities()) == FontStyleAxis::ital)
+                applyVariation(FontVariationAxisTag::ital, 1);
+            else {
+                float slope = description.fontStyleSlope().value_or(normalItalicValue());
+                if (auto slopeValue = fontCreationContext.fontFaceCapabilities().slope)
+                    slope = std::max(std::min(slope, static_cast<float>(slopeValue->maximum)), static_cast<float>(slopeValue->minimum));
+                // The 'slnt' axis is positive counter-clockwise; a CSS oblique angle is positive clockwise.
+                applyVariation(FontVariationAxisTag::slnt, -slope);
+            }
 
-        if (variationStyleAxis(description, fontCreationContext.fontFaceCapabilities()) == FontStyleAxis::ital)
-            applyVariation(FontVariationAxisTag::ital, 1);
-        else {
-            float slope = description.fontStyleSlope().value_or(normalItalicValue());
-            if (auto slopeValue = fontCreationContext.fontFaceCapabilities().slope)
-                slope = std::max(std::min(slope, static_cast<float>(slopeValue->maximum)), static_cast<float>(slopeValue->minimum));
-            // The 'slnt' axis is positive counter-clockwise; a CSS oblique angle is positive clockwise.
-            applyVariation(FontVariationAxisTag::slnt, -slope);
+            if (auto opticalSize = opticalSizingValue(defaultValues, description, size))
+                applyVariation(FontVariationAxisTag::opsz, *opticalSize);
+
+            const auto& variations = description.variationSettings();
+            for (auto& variation : variations) {
+                if (variation.tag() != FontVariationAxisTag::opsz)
+                    applyVariation(variation.tag(), variation.value());
+            }
+
+            if (!variationsToBeApplied.isEmpty())
+                typeface = retrieveOrAddCachedTypeface(variationsToBeApplied);
         }
 
-        // FIXME: optical sizing.
+        auto features = FontCache::computeFeatures(description, fontCreationContext);
 
-        const auto& variations = description.variationSettings();
-        for (auto& variation : variations)
-            applyVariation(variation.tag(), variation.value());
-
-        if (!variationsToBeApplied.isEmpty())
-            typeface = retrieveOrAddCachedTypeface(variationsToBeApplied);
-    }
+        FontPlatformData platformData(WTF::move(typeface), size, computeSyntheticBold(hasWeightVariationAxis, description, fontCreationContext), computeSyntheticItalic(hasSlopeVariationAxis, description, fontCreationContext), description.orientation(), description.widthVariant(), description.textRenderingMode(), WTF::move(features), fontCreationContext.metricsOverrides(), this);
+        return platformData;
+    };
 
     auto size = description.adjustedSizeForFontFace(fontCreationContext.sizeAdjust());
-    auto features = FontCache::computeFeatures(description, fontCreationContext);
-
-    FontPlatformData platformData(WTF::move(typeface), size, computeSyntheticBold(hasWeightVariationAxis, description, fontCreationContext), computeSyntheticItalic(hasSlopeVariationAxis, description, fontCreationContext), description.orientation(), description.widthVariant(), description.textRenderingMode(), WTF::move(features), fontCreationContext.metricsOverrides(), this);
+    auto platformData = createPlatformData(size);
     platformData.updateSizeWithFontSizeAdjust(description.fontSizeAdjust(), description.usedSize());
+    if (platformData.size() != size && opticalSizingValue(defaultValues, description, size) != opticalSizingValue(defaultValues, description, platformData.size()))
+        return createPlatformData(platformData.size());
     return platformData;
 }
 
