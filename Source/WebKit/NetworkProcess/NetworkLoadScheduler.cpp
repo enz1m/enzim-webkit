@@ -38,6 +38,7 @@
 namespace WebKit {
 
 static constexpr size_t maximumActiveCountForLowPriority = 2;
+static constexpr size_t maximumParsedHTTP2LowPriorityCount = 6;
 static constexpr size_t maximumTrackedHTTP1XOrigins = 128;
 
 static bool pendingCacheWakeEnabled()
@@ -160,9 +161,14 @@ bool NetworkLoadScheduler::HostContext::shouldDelayLowPriority(const NetworkLoad
     if (!usesH2Budget(load))
         return m_activeLoads.computeSize() >= maximumActiveCountForLowPriority;
 
+    static const bool expandedWindow = [] {
+        const char* value = getenv("WPE_H2_BACKGROUND_WINDOW");
+        return !value || *value != '0';
+    }();
+    auto limit = expandedWindow ? maximumParsedHTTP2LowPriorityCount : maximumActiveCountForLowPriority;
     size_t lowPriorityCount = 0;
     for (Ref active : m_activeLoads) {
-        if (active->currentRequest().priority() <= WebCore::ResourceLoadPriority::Low && ++lowPriorityCount >= maximumActiveCountForLowPriority)
+        if (active->currentRequest().priority() <= WebCore::ResourceLoadPriority::Low && ++lowPriorityCount >= limit)
             return true;
     }
     static unsigned traceBudget = 32;
