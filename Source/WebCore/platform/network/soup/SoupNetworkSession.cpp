@@ -35,6 +35,7 @@
 #include "WebKitAutoconfigProxyResolver.h"
 #include <glib/gstdio.h>
 #include <libsoup/soup.h>
+#include <mutex>
 #include <pal/crypto/CryptoDigest.h>
 #include <wtf/FileSystem.h>
 #include <wtf/HashSet.h>
@@ -97,9 +98,31 @@ private:
     HashSet<String> m_certificates;
 };
 
+// The first HTTPS connection otherwise loads the GIO TLS module and parses the
+// system trust store on the network thread, between TCP connect and the TLS
+// handshake. glib-networking creates the default database once under a lock, so
+// a connection that needs it earlier waits for this load instead of repeating it.
+static void prewarmTLSDatabase()
+{
+    static std::once_flag onceFlag;
+    std::call_once(onceFlag, [] {
+        const char* value = g_getenv("WPE_TLS_PREWARM");
+        if (value && !g_strcmp0(value, "0"))
+            return;
+        GThread* thread = g_thread_try_new("TLSPrewarm", [](gpointer) -> gpointer {
+            GRefPtr<GTlsDatabase> database = adoptGRef(g_tls_backend_get_default_database(g_tls_backend_get_default()));
+            return nullptr;
+        }, nullptr, nullptr);
+        if (thread)
+            g_thread_unref(thread);
+    });
+}
+
 SoupNetworkSession::SoupNetworkSession(PAL::SessionID sessionID)
     : m_sessionID(sessionID)
 {
+    prewarmTLSDatabase();
+
     // These values match Chrome 81. https://stackoverflow.com/a/30064610
     static const int maxConnections = 256;
     static const int maxConnectionsPerHost = 6;
