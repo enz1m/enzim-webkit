@@ -34,6 +34,7 @@
 #include "DocumentResourceLoader.h"
 #include "Settings.h"
 #include "WorkerOrWorkletGlobalScope.h"
+#include <wtf/DataLog.h>
 
 namespace WebCore {
 
@@ -42,9 +43,22 @@ Ref<CachedScriptFetcher> CachedScriptFetcher::create(const AtomString& charset)
     return adoptRef(*new CachedScriptFetcher(charset));
 }
 
+Ref<CachedScriptFetcher> CachedScriptFetcher::forDynamicImport() const
+{
+    return forDynamicImport(m_moduleCrossOriginMode.isNull() ? String(defaultCrossOriginModeForModule) : m_moduleCrossOriginMode);
+}
+
+Ref<CachedScriptFetcher> CachedScriptFetcher::forDynamicImport(const String& crossOriginMode) const
+{
+    auto fetcher = adoptRef(*new CachedScriptFetcher(m_nonce, m_referrerPolicy, RequestPriority::Auto, m_charset, m_initiatorType, m_isInUserAgentShadowTree));
+    fetcher->m_moduleCrossOriginMode = crossOriginMode;
+    fetcher->m_ignoreForRequestCount = true;
+    return fetcher;
+}
+
 CachedResourceHandle<CachedResource> CachedScriptFetcher::requestModuleResource(Document& document, const URL& sourceURL, FetchOptionsDestination destination, String&& integrity, std::optional<ServiceWorkersMode> serviceWorkersMode, const URL& referrer) const
 {
-    return requestResourceWithCache(document, sourceURL, destination, defaultCrossOriginModeForModule, WTF::move(integrity), { }, serviceWorkersMode, referrer);
+    return requestResourceWithCache(document, sourceURL, destination, m_moduleCrossOriginMode.isNull() ? String(defaultCrossOriginModeForModule) : m_moduleCrossOriginMode, WTF::move(integrity), { }, serviceWorkersMode, referrer);
 }
 
 RefPtr<CachedResource> CachedScriptFetcher::requestResourceWithCache(Document& document, const URL& sourceURL, FetchOptionsDestination destination, const String& crossOriginMode, String&& integrity, std::optional<ResourceLoadPriority> resourceLoadPriority, std::optional<ServiceWorkersMode> serviceWorkersMode, const URL& referrer) const
@@ -66,6 +80,13 @@ RefPtr<CachedResource> CachedScriptFetcher::requestResourceWithCache(Document& d
 
     auto request = createPotentialAccessControlRequest(URL { sourceURL }, WTF::move(options), document, crossOriginMode);
     request.upgradeInsecureRequestIfNeeded(document);
+    request.setIgnoreForRequestCount(m_ignoreForRequestCount);
+    if (m_ignoreForRequestCount) {
+        static const bool trace = StringView::fromLatin1(getenv("WPE_DYNAMIC_IMPORT_LOAD_TRACE")) == "1"_s;
+        static thread_local unsigned traces;
+        if (trace && traces++ < 32)
+            dataLogLn("WPE dynamic import does not delay document load");
+    }
     request.setCharset(m_charset);
     request.setPriority(WTF::move(resourceLoadPriority));
     // Only an HTTP(S) fetch appends a Referer header, and CachedResourceLoader applies the referrer

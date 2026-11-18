@@ -76,6 +76,10 @@ CachedResourceRequest PreloadRequest::resourceRequest(Document& document)
     options.integrity = m_integrityAttribute;
     auto request = createPotentialAccessControlRequest(completeURL(document), WTF::move(options), document, crossOriginMode);
     request.setInitiatorType(m_initiatorType);
+    if (m_scriptType == ScriptType::Module && m_initiatorType == "link"_s) {
+        request.setIgnoreForRequestCount(true);
+        request.setIsLinkPreload();
+    }
 
     if (m_scriptIsAsync && m_resourceType == CachedResource::Type::Script && m_scriptType == ScriptType::Classic)
         request.setPriority(DefaultResourceLoadPriority::asyncScript);

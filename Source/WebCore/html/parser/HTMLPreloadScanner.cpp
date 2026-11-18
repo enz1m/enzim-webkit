@@ -190,6 +190,14 @@ public:
                 return nullptr;
         }
 
+        if (m_tagId == TagId::Link && m_linkIsModulePreload) {
+            scriptType = ScriptType::Module;
+            static const bool trace = StringView::fromLatin1(getenv("WPE_LINK_MODULE_PRELOAD_TRACE")) == "1"_s;
+            static thread_local unsigned traces;
+            if (trace && traces++ < 32)
+                dataLogLn("WPE scanner discovers modulepreload link");
+        }
+
         auto request = makeUnique<PreloadRequest>(initiatorFor(m_tagId), m_urlToLoad, predictedBaseURL, type.value(), m_mediaAttribute, scriptType.value_or(ScriptType::Classic), m_referrerPolicy, m_fetchPriority);
         request->setCrossOriginMode(m_crossOriginMode);
         request->setNonce(m_nonceAttribute);
@@ -325,6 +333,16 @@ private:
                 LinkRelAttribute parsedAttribute { m_document, attributeValue };
                 m_linkIsStyleSheet = relAttributeIsStyleSheet(parsedAttribute);
                 m_linkIsPreload = parsedAttribute.isLinkPreload;
+                static const bool modulePreload = [] {
+                    if (const char* value = getenv("WPE_LINK_MODULE_PRELOAD"))
+                        return *value != '0';
+#if PLATFORM(WPE)
+                    return true;
+#else
+                    return false;
+#endif
+                }();
+                m_linkIsModulePreload = modulePreload && parsedAttribute.isLinkModulePreload && !m_linkIsStyleSheet;
             } else if (match(attributeName, mediaAttr))
                 m_mediaAttribute = attributeValue.toString();
             else if (match(attributeName, charsetAttr))
@@ -333,6 +351,8 @@ private:
                 m_crossOriginMode = attributeValue.trim(isASCIIWhitespace<char16_t>).toString();
             else if (match(attributeName, nonceAttr))
                 m_nonceAttribute = attributeValue.toString();
+            else if (match(attributeName, integrityAttr))
+                m_integrityAttribute = attributeValue.toString();
             else if (match(attributeName, asAttr))
                 m_asAttribute = attributeValue.toString();
             else if (match(attributeName, typeAttr))
@@ -415,6 +435,11 @@ private:
             ASSERT(m_tagId != TagId::Input || m_inputIsImage);
             return CachedResource::Type::ImageResource;
         case TagId::Link:
+            if (m_linkIsModulePreload) {
+                if (m_asAttribute.isEmpty() || equalLettersIgnoringASCIICase(m_asAttribute, "script"_s))
+                    return CachedResource::Type::Script;
+                return std::nullopt;
+            }
             if (m_linkIsStyleSheet)
                 return CachedResource::Type::CSSStyleSheet;
             if (m_linkIsPreload)
@@ -441,7 +466,7 @@ private:
         if (protocolIs(m_urlToLoad, "data"_s) || protocolIs(m_urlToLoad, "about"_s))
             return false;
 
-        if (m_tagId == TagId::Link && !m_linkIsStyleSheet && !m_linkIsPreload)
+        if (m_tagId == TagId::Link && !m_linkIsStyleSheet && !m_linkIsPreload && !m_linkIsModulePreload)
             return false;
 
         if (m_tagId == TagId::Link && m_linkIsDisabled)
@@ -464,6 +489,7 @@ private:
     String m_crossOriginMode;
     bool m_linkIsStyleSheet;
     bool m_linkIsPreload;
+    bool m_linkIsModulePreload { false };
     bool m_linkIsDisabled { false };
     String m_mediaAttribute;
     String m_nonceAttribute;

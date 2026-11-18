@@ -1417,7 +1417,13 @@ ResourceErrorOr<Ref<CachedResource>> CachedResourceLoader::requestResource(Cache
 #endif
     }();
     if (RefPtr subresourceLoader = resource->loader(); forPreload == ForPreload::No && subresourceLoader && resource->ignoreForRequestCount()) {
-        if (preserveLazyImageExemption && type == CachedResource::Type::ImageResource && ignoreForRequestCount) {
+        bool isModuleResource = type == CachedResource::Type::Script || type == CachedResource::Type::JSON || type == CachedResource::Type::Text || type == CachedResource::Type::CSSStyleSheet;
+        if (isModuleResource && ignoreForRequestCount) {
+            static const bool trace = StringView::fromLatin1(getenv("WPE_DYNAMIC_IMPORT_LOAD_TRACE")) == "1"_s;
+            static thread_local unsigned traces;
+            if (trace && traces++ < 32)
+                dataLogLn("WPE shared dynamic import remains nonblocking");
+        } else if (preserveLazyImageExemption && type == CachedResource::Type::ImageResource && ignoreForRequestCount) {
             static const bool trace = StringView::fromLatin1(getenv("WPE_LAZY_IMAGE_ACCOUNTING_TRACE")) == "1"_s;
             static thread_local unsigned traces;
             if (trace && traces++ < 32)

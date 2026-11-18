@@ -422,6 +422,18 @@ JSC::JSPromise* ScriptModuleLoader::importModule(JSC::JSGlobalObject* jsGlobalOb
 
     ASSERT(scriptFetcher);
     ASSERT(parameters);
+    static const bool nonblockingDynamicImport = [] {
+        if (const char* value = getenv("WPE_DYNAMIC_IMPORT_LOAD"))
+            return *value != '0';
+#if PLATFORM(WPE)
+        return true;
+#else
+        return false;
+#endif
+    }();
+    if (nonblockingDynamicImport && m_ownerType == OwnerType::Document)
+        scriptFetcher = downcast<CachedScriptFetcher>(*scriptFetcher).forDynamicImport();
+
 
     RETURN_IF_EXCEPTION(scope, reject(scope));
     RELEASE_AND_RETURN(scope, JSC::importModule(jsGlobalObject, JSC::Identifier::fromString(vm, specifier), JSC::Identifier::fromString(vm, baseURL.string()), WTF::move(parameters), WTF::move(scriptFetcher), deferred));

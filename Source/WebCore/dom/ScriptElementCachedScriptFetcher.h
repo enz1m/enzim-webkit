@@ -35,6 +35,11 @@ class ScriptElementCachedScriptFetcher : public CachedScriptFetcher {
 public:
     virtual CachedResourceHandle<CachedResource> requestModuleResource(Document&, const URL& sourceURL, FetchOptionsDestination, String&& integrity, std::optional<ServiceWorkersMode>, const URL& referrer) const;
 
+    Ref<CachedScriptFetcher> forDynamicImport() const final
+    {
+        return CachedScriptFetcher::forDynamicImport(isClassicScript() ? String(defaultCrossOriginModeForModule) : m_crossOriginMode);
+    }
+
     virtual ScriptType scriptType() const = 0;
     bool isClassicScript() const { return scriptType() == ScriptType::Classic; }
     bool isModuleScript() const { return scriptType() == ScriptType::Module; }

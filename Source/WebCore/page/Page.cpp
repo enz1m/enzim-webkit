@@ -71,6 +71,10 @@
 #include "DocumentFullscreen.h"
 #include "DocumentInlines.h"
 #include "DocumentLoader.h"
+#include "LocalFrameView.h"
+#include "Performance.h"
+#include "PerformanceEntry.h"
+#include <wtf/DataLog.h>
 #include "DocumentMarkerController.h"
 #include "DocumentPage.h"
 #include "DocumentQuirks.h"
@@ -2911,14 +2915,41 @@ void Page::prioritizeVisibleResources()
         if (localTopDocument->parsing())
             return LoadSchedulingMode::Prioritized;
         
-        // Async script execution may generate more resource loads that benefit from prioritization.
-        if (auto* scriptRunner = localTopDocument->scriptRunnerIfExists(); scriptRunner && scriptRunner->hasPendingScripts())
+        static const bool postPaintScheduling = [] {
+            if (const char* value = getenv("WPE_POST_PAINT_SCHEDULING"))
+                return *value != '0';
+#if PLATFORM(WPE)
+            return true;
+#else
+            return false;
+#endif
+        }();
+        bool canRelaxAsyncHold = false;
+        if (postPaintScheduling) {
+            RefPtr view = localTopDocument->view();
+            RefPtr loader = localTopDocument->loader();
+            RefPtr window = localTopDocument->window();
+            RefPtr frame = localTopDocument->frame();
+            canRelaxAsyncHold = view && !view->needsLayout() && window && frame
+                && !frame->loader().provisionalDocumentLoader()
+                && !window->performance().getEntriesByName("first-contentful-paint"_s, "paint"_s).isEmpty()
+                && loader && loader->response().httpVersion() == "HTTP/2"_s;
+        }
+        auto* scriptRunner = localTopDocument->scriptRunnerIfExists();
+        bool hasPendingScripts = scriptRunner && scriptRunner->hasPendingScripts();
+        if (hasPendingScripts && !canRelaxAsyncHold)
             return LoadSchedulingMode::Prioritized;
         
         // We still haven't finished loading the visible resources.
         if (!toPrioritize.isEmpty())
             return LoadSchedulingMode::Prioritized;
-        
+
+        if (hasPendingScripts && canRelaxAsyncHold) {
+            static const bool trace = StringView::fromLatin1(getenv("WPE_POST_PAINT_SCHEDULING_TRACE")) == "1"_s;
+            static thread_local unsigned traces;
+            if (trace && traces++ < 8)
+                dataLogLn("WPE post-paint HTTP2 scheduling releases async hold");
+        }
         return LoadSchedulingMode::Direct;
     };
     

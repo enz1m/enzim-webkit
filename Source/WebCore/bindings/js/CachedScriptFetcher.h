@@ -49,8 +49,11 @@ public:
     virtual CachedResourceHandle<CachedResource> requestModuleResource(Document&, const URL& sourceURL, FetchOptionsDestination, String&& integrity, std::optional<ServiceWorkersMode>, const URL& referrer) const;
 
     static Ref<CachedScriptFetcher> LEGACY_NODELETE create(const AtomString& charset);
+    virtual Ref<CachedScriptFetcher> forDynamicImport() const;
 
 protected:
+    Ref<CachedScriptFetcher> forDynamicImport(const String& crossOriginMode) const;
+
     CachedScriptFetcher(const String& nonce, ReferrerPolicy referrerPolicy, RequestPriority fetchPriority, const AtomString& charset, const AtomString& initiatorType, bool isInUserAgentShadowTree)
         : m_nonce(nonce)
         , m_charset(charset)
@@ -71,6 +74,8 @@ protected:
 private:
     bool isCachedScriptFetcher() const final { return true; }
 
+    String m_moduleCrossOriginMode;
+    bool m_ignoreForRequestCount { false };
     String m_nonce;
     AtomString m_charset;
     AtomString m_initiatorType;
