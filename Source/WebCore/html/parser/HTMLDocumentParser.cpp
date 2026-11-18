@@ -347,6 +347,7 @@ void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
         ASSERT(m_tokenizer.isInDataState());
         bool stopAtHttpEquiv = false;
 #if PLATFORM(WPE)
+        stopAtHttpEquiv = true;
         static const bool rebaseStreamPreload = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD_REBASE")) != "0"_s;
         if (rebaseStreamPreload && m_preloadScanner && m_preloadScanner->stopsAtHttpEquiv()) {
             static const bool rebaseUnstopped = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD_REBASE_UNSTOPPED")) == "1"_s;
@@ -429,8 +430,13 @@ void HTMLDocumentParser::insert(SegmentedString&& source)
         RefPtr document = this->document();
         // Check the document.write() output with a separate preload scanner as
         // the main scanner can't deal with insertions.
-        if (!m_insertionPreloadScanner)
+        if (!m_insertionPreloadScanner) {
+#if PLATFORM(WPE)
+            m_insertionPreloadScanner = makeUnique<HTMLPreloadScanner>(m_options, document->url(), document->deviceScaleFactor(), true);
+#else
             m_insertionPreloadScanner = makeUnique<HTMLPreloadScanner>(m_options, document->url(), document->deviceScaleFactor());
+#endif
+        }
         m_insertionPreloadScanner->appendToEnd(source);
         m_insertionPreloadScanner->scan(*m_preloader, *document);
     }
