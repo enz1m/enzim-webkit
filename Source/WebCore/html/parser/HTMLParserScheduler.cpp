@@ -31,11 +31,16 @@
 #include "DocumentView.h"
 #include "ElementInlines.h"
 #include "HTMLDocumentParser.h"
+#include "HTMLNames.h"
 #include "LocalFrame.h"
 #include "LocalFrameView.h"
 #include "ScriptController.h"
 #include "ScriptElement.h"
+#include "Settings.h"
+#include <cstdlib>
+#include <wtf/DataLog.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/text/StringView.h>
 #include "FrameDestructionObserverInlines.h"
 
 namespace WebCore {
@@ -148,6 +153,22 @@ bool HTMLParserScheduler::shouldYieldBeforeExecutingScript(const ScriptElement* 
 
     if (m_documentHasActiveParserYieldTokens) [[unlikely]]
         return true;
+
+#if PLATFORM(WPE)
+    static const bool skipInertScripts = StringView::fromLatin1(std::getenv("WPE_INERT_SCRIPT_YIELD")) != "1"_s;
+    if (skipInertScripts && scriptElement) {
+        const auto& element = scriptElement->element();
+        if (!ScriptElement::determineScriptType(element.attributeWithoutSynchronization(HTMLNames::typeAttr), element.attributeWithoutSynchronization(HTMLNames::languageAttr), document->isHTMLDocument(), document->settings().speculationRulesPrefetchEnabled())) {
+            static const bool trace = StringView::fromLatin1(std::getenv("WPE_INERT_SCRIPT_YIELD_TRACE")) == "1"_s;
+            static thread_local unsigned traceBudget = 16;
+            if (trace && traceBudget) {
+                --traceBudget;
+                dataLogLn("WPE_INERT_SCRIPT_YIELD skipped=true type=", element.attributeWithoutSynchronization(HTMLNames::typeAttr).string().left(64));
+            }
+            return false;
+        }
+    }
+#endif
 
     // Yield if we have never painted and there is meaningful content
     if (document->view() && !document->view()->hasEverPainted() && document->view()->isVisuallyNonEmpty())
