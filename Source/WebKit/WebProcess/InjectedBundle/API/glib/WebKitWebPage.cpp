@@ -803,7 +803,11 @@ extern "C" WEBKIT_API gboolean webkit_web_page_enzui_document_ready_v1(WebKitWeb
     if (!frame)
         return FALSE;
     RefPtr document = frame->document();
-    if (!document || document->readyState() != Document::ReadyState::Complete || !document->loadEventFinished() || document->processingLoadEvent())
+    if (!document || document->readyState() != Document::ReadyState::Complete || document->processingLoadEvent())
+        return FALSE;
+    // A load stopped before its load event, such as by a script navigation the
+    // policy then refused, is complete without ever firing that event.
+    if (!document->loadEventFinished() && !frame->loader().isComplete())
         return FALSE;
     // A completed old document may already be handing off to its replacement.
     if (frame->navigationScheduler().hasQueuedNavigation() || frame->loader().policyDocumentLoader() || frame->loader().provisionalDocumentLoader())
