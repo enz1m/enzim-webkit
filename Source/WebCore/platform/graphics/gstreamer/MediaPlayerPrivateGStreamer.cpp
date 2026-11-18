@@ -2196,6 +2196,10 @@ void MediaPlayerPrivateGStreamer::notifyPlayerOfVolumeChange()
         return;
     }
     m_lastObservedVolume = oldVolume;
+    // An accepted external value replaces the DOM request as the current volume. HTMLMediaElement
+    // does not call back into setVolume from this notification, so retire the request here; a
+    // later return to its value is a genuine change, not that setter's acknowledgement.
+    m_requestedVolume.reset();
     // External changes retain their native precision, including a distinct adjacent mixer step.
     auto volume = CLAMP(oldVolume, 0.0, 1.0);
 
