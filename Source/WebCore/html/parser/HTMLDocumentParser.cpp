@@ -345,8 +345,18 @@ void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
     RefPtr document = this->document();
     if (isWaitingForScripts() && !isDetached()) {
         ASSERT(m_tokenizer.isInDataState());
+        bool stopAtHttpEquiv = false;
+#if PLATFORM(WPE)
+        static const bool rebaseStreamPreload = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD_REBASE")) != "0"_s;
+        if (rebaseStreamPreload && m_preloadScanner && m_preloadScanner->stopsAtHttpEquiv()) {
+            // Restart from input the real parser has not consumed. Earlier meta
+            // policies have taken effect, and later ones still stop speculation.
+            stopAtHttpEquiv = true;
+            m_preloadScanner = nullptr;
+        }
+#endif
         if (!m_preloadScanner) {
-            m_preloadScanner = makeUnique<HTMLPreloadScanner>(m_options, document->url(), document->deviceScaleFactor());
+            m_preloadScanner = makeUnique<HTMLPreloadScanner>(m_options, document->url(), document->deviceScaleFactor(), stopAtHttpEquiv);
             m_preloadScanner->appendToEnd(m_input.current());
         }
         m_preloadScanner->scan(*m_preloader, *document);
