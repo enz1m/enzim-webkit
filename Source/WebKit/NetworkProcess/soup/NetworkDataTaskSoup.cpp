@@ -954,14 +954,39 @@ void NetworkDataTaskSoup::read()
 {
     RefPtr<NetworkDataTaskSoup> protectedThis(this);
     ASSERT(m_inputStream);
-    m_readBuffer.grow(gDefaultReadBufferSize);
+    size_t readSize = gDefaultReadBufferSize;
+#if PLATFORM(WPE)
+    static const bool batchBinaryReads = [] {
+        const char* value = getenv("WPE_READ_BINARY_BATCH");
+        return !value || *value != '0';
+    }();
+    if (batchBinaryReads && m_soupMessage && !isDownload() && !m_multipartInputStream && m_response.expectedContentLength() >= 128 * 1024) {
+        const auto& mime = m_response.mimeType();
+        bool binary = mime.startsWith("image/"_s) || mime.startsWith("font/"_s) || mime == "application/octet-stream"_s;
+        if (binary && soup_message_metrics_get_response_body_size(soup_message_get_metrics(m_soupMessage.get())) >= 64 * 1024)
+            readSize = 16 * 1024;
+    }
+#endif
+    m_readBuffer.grow(readSize);
     g_input_stream_read_async(m_inputStream.get(), m_readBuffer.mutableSpan().data(), m_readBuffer.size(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
         reinterpret_cast<GAsyncReadyCallback>(readCallback), protectedThis.leakRef());
 }
 
 void NetworkDataTaskSoup::didRead(gssize bytesRead)
 {
+#if PLATFORM(WPE)
+    static const bool trace = !!getenv("WPE_READ_BINARY_BATCH_TRACE");
+    static unsigned traceBudget = 128;
+    if (trace && traceBudget) {
+        --traceBudget;
+        auto delivered = m_soupMessage ? soup_message_metrics_get_response_body_size(soup_message_get_metrics(m_soupMessage.get())) : 0;
+        g_printerr("WPE_BINARY_READ requested=%zu received=%zd delivered=%" G_GUINT64_FORMAT " expected=%lld\n", m_readBuffer.size(), bytesRead, delivered, static_cast<long long>(m_response.expectedContentLength()));
+    }
+#endif
+    bool oversizedPartial = m_readBuffer.size() > gDefaultReadBufferSize && bytesRead < static_cast<gssize>(gDefaultReadBufferSize);
     m_readBuffer.shrink(bytesRead);
+    if (oversizedPartial)
+        m_readBuffer.shrinkToFit();
     if (m_downloadOutputStream) {
         ASSERT(isDownload());
         writeDownload();
