@@ -686,9 +686,16 @@ bool MediaPlayerPrivateGStreamer::doSeek(const SeekTarget& target, float rate, b
     if (isSegment || !isSeamlessSeekingEnabled() || !result)
         return result;
 
+    // A non-flushing seek makes a pull-mode demuxer wait for its streaming thread, which can itself
+    // be waiting for media data that only this thread delivers. Send it from GStreamer's thread, as
+    // the asynchronous path above does.
     GST_DEBUG_OBJECT(m_pipeline.get(), "Resuming segment playback");
     seekFlags = static_cast<GstSeekFlags>(GST_SEEK_FLAG_SEGMENT | GST_SEEK_FLAG_ACCURATE);
-    return gst_element_send_event(m_pipeline.get(), gst_event_new_seek(rate, GST_FORMAT_TIME, seekFlags, GST_SEEK_TYPE_SET, seekStart, GST_SEEK_TYPE_SET, seekStop));
+    auto* resume = gst_event_new_seek(rate, GST_FORMAT_TIME, seekFlags, GST_SEEK_TYPE_SET, seekStart, GST_SEEK_TYPE_SET, seekStop);
+    gst_element_call_async(m_pipeline.get(), reinterpret_cast<GstElementCallAsyncFunc>(+[](GstElement* pipeline, gpointer event) {
+        gst_element_send_event(pipeline, GST_EVENT_CAST(event));
+    }), resume, nullptr);
+    return true;
 }
 
 Ref<MediaTimePromise> MediaPlayerPrivateGStreamer::seekToTarget(const SeekTarget& inTarget)
