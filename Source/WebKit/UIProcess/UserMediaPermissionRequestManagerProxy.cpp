@@ -730,6 +730,13 @@ void UserMediaPermissionRequestManagerProxy::processUserMediaPermissionInvalidRe
     ALWAYS_LOG(LOGIDENTIFIER, m_currentUserMediaRequest->userMediaID() ? m_currentUserMediaRequest->userMediaID()->toUInt64() : 0);
     bool filterConstraint = !m_currentUserMediaRequest->hasPersistentAccess() && !wasGrantedVideoOrAudioAccess(m_currentUserMediaRequest->frameID());
 
+    // Where validating a display request opens the desktop's picker (the
+    // ScreenCast portal), a request no constraint failed was cancelled there.
+    if (m_currentUserMediaRequest->requiresDisplayCapture() && invalidConstraint == MediaConstraintType::Unknown) {
+        denyRequest(protect(*m_currentUserMediaRequest), UserMediaPermissionRequestProxy::UserMediaAccessDenialReason::PermissionDenied);
+        return;
+    }
+
     denyRequest(protect(*m_currentUserMediaRequest), filterConstraint ? MediaConstraintType::Unknown : invalidConstraint);
 }
 
