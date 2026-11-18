@@ -27,6 +27,7 @@
 #include "src/core/SkAdvancedTypefaceMetrics.h"
 #include "src/core/SkFontDescriptor.h"
 #include "src/core/SkOSFile.h"
+#include "src/core/SkLRUCache.h"
 #include "src/core/SkScalerContext.h"
 #include "src/core/SkTSort.h"
 #include "src/core/SkTypefaceCache.h"
@@ -38,6 +39,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <utility>
 
@@ -590,6 +592,33 @@ class SkFontMgr_fontconfig : public SkFontMgr {
 
     mutable SkMutex fTFCacheMutex;
     mutable SkTypefaceCache fTFCache;
+    struct FontSets {
+        FcFontSet* system;
+        FcPattern** systemFonts;
+        int systemCount;
+        FcFontSet* application;
+        FcPattern** applicationFonts;
+        int applicationCount;
+        bool operator==(const FontSets&) const = default;
+    };
+    FontSets fontSets() const {
+        FCLocker lock;
+        auto* system = FcConfigGetFonts(fFC, FcSetSystem);
+        auto* application = FcConfigGetFonts(fFC, FcSetApplication);
+        return {system, system ? system->fonts : nullptr, system ? system->nfont : 0,
+                application, application ? application->fonts : nullptr,
+                application ? application->nfont : 0};
+    }
+    const bool fFamilyCacheEnabled = [] {
+        const char* value = std::getenv("SK_FONTCONFIG_FAMILY_CACHE");
+        return !value || strcmp(value, "0");
+    }();
+    const bool fFamilyCacheTrace = std::getenv("SK_FONTCONFIG_FAMILY_CACHE_TRACE");
+    // Pattern destruction takes FCLocker under the cache lock; matching releases it first.
+    mutable SkMutex fFamilyCacheMutex;
+    mutable SkLRUCache<SkString, std::shared_ptr<FcPattern>> fFamilyCache{64};
+    mutable FontSets fFamilyCacheFontSets{};
+
     /** Creates a typeface using a typeface cache.
      *  @param pattern a complete pattern from FcFontRenderPrepare.
      */
@@ -630,6 +659,7 @@ public:
         }
 
     ~SkFontMgr_fontconfig() override {
+        fFamilyCache.reset();
         // Hold the lock while unrefing the config.
         FCLocker lock;
         fFC.reset();
@@ -794,6 +824,37 @@ protected:
     sk_sp<SkTypeface> onMatchFamilyStyle(const char familyName[],
                                          const SkFontStyle& style) const override
     {
+        bool cacheable = fFamilyCacheEnabled && (!familyName || strnlen(familyName, 257) <= 256);
+        SkString key;
+        FontSets sets{};
+        if (cacheable) {
+            key.printf("%d/%d/%d/%d/", !!familyName, style.weight(), style.width(), style.slant());
+            if (familyName) key.append(familyName);
+            sets = this->fontSets();
+            std::shared_ptr<FcPattern> cached;
+            bool hit = false;
+            {
+                SkAutoMutexExclusive lock(fFamilyCacheMutex);
+                if (!(sets == fFamilyCacheFontSets)) {
+                    fFamilyCache.reset();
+                    fFamilyCacheFontSets = sets;
+                }
+                if (auto* entry = fFamilyCache.find(key)) {
+                    cached = *entry;
+                    hit = true;
+                }
+                if (fFamilyCacheTrace) {
+                    SkDebugf("SK_FONTCONFIG_FAMILY_CACHE hit=%d entries=%d\n", hit, fFamilyCache.count());
+                }
+            }
+            if (hit) {
+                SkAutoFcPattern pattern([&] {
+                    FCLocker lock;
+                    return cached ? FcPatternDuplicate(cached.get()) : nullptr;
+                }());
+                return createTypefaceFromFcPattern(std::move(pattern));
+            }
+        }
         SkAutoFcPattern font([this, &familyName, &style]() {
             FCLocker lock;
 
@@ -828,6 +889,21 @@ protected:
             }
             return font;
         }());
+        if (cacheable) {
+            std::shared_ptr<FcPattern> cached([&] {
+                FCLocker lock;
+                return font ? FcPatternDuplicate(font) : nullptr;
+            }(), [](FcPattern* pattern) {
+                if (pattern) {
+                    FCLocker lock;
+                    FcPatternDestroy(pattern);
+                }
+            });
+            SkAutoMutexExclusive lock(fFamilyCacheMutex);
+            if (sets == fFamilyCacheFontSets) {
+                fFamilyCache.insert_or_update(std::move(key), std::move(cached));
+            }
+        }
         return createTypefaceFromFcPattern(std::move(font));
     }
 
