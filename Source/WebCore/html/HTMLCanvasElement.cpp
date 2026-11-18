@@ -79,6 +79,8 @@
 #include "WebCoreOpaqueRoot.h"
 #include <JavaScriptCore/JSCInlines.h>
 #include <math.h>
+#include <atomic>
+#include <wtf/DataLog.h>
 #include <wtf/RAMSize.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/StringBuilder.h>
@@ -622,6 +624,26 @@ GPUCanvasContext* HTMLCanvasElement::getContextWebGPU(const String& type, GPU* g
 void HTMLCanvasElement::willUpdateContents(const std::optional<FloatRect>& rect, ShouldApplyPostProcessingToDirtyRect shouldApplyPostProcessingToDirtyRect)
 {
     m_copiedImage = nullptr;
+    static const bool coalescing = [] {
+        if (const char* value = getenv("WPE_CANVAS_COALESCE_DAMAGE"))
+            return *value != '0';
+#if PLATFORM(WPE)
+        return true;
+#else
+        return false;
+#endif
+    }();
+    if (coalescing) {
+        if (auto* context = dynamicDowncast<CanvasRenderingContext2D>(m_context.get()); context && context->hasPendingFullCanvasInvalidation()) {
+            CanvasBase::willUpdateContents(rect, shouldApplyPostProcessingToDirtyRect);
+            static const bool trace = StringView::fromLatin1(getenv("WPE_CANVAS_DAMAGE_TRACE")) == "1"_s;
+            static std::atomic<unsigned> traces { 0 };
+            auto count = trace ? traces.load(std::memory_order_relaxed) : 32;
+            if (count < 32 && traces.compare_exchange_strong(count, count + 1, std::memory_order_relaxed))
+                dataLogLn("WPE canvas repaint already covered");
+            return;
+        }
+    }
     if (CheckedPtr renderer = renderBox()) {
         bool usesLayerContents = usesContentsAsLayerContents();
 #if ENABLE(DAMAGE_TRACKING)

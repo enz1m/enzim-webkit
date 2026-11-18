@@ -50,6 +50,7 @@
 #include <JavaScriptCore/JSCInlines.h>
 #include <JavaScriptCore/JSLock.h>
 #include <atomic>
+#include <wtf/DataLog.h>
 #include <wtf/Vector.h>
 #include <wtf/WeakRandom.h>
 #include <wtf/text/MakeString.h>
@@ -166,6 +167,23 @@ void CanvasBase::notifyObserversContentsWillChange(const FloatRect& rect)
 void CanvasBase::willUpdateContents(const std::optional<FloatRect>& rect, ShouldApplyPostProcessingToDirtyRect shouldApplyPostProcessingToDirtyRect)
 {
     addCanvasNeedingPreparationForDisplayOrFlush();
+    static const bool skipUnusedBounds = [] {
+        if (const char* value = getenv("WPE_CANVAS_SKIP_UNUSED_BOUNDS"))
+            return *value != '0';
+#if PLATFORM(WPE)
+        return true;
+#else
+        return false;
+#endif
+    }();
+    if (skipUnusedBounds && m_observers.isEmptyIgnoringNullReferences() && !shouldInjectNoiseBeforeReadback()) {
+        static const bool trace = StringView::fromLatin1(getenv("WPE_CANVAS_DAMAGE_TRACE")) == "1"_s;
+        static std::atomic<unsigned> traces { 0 };
+        auto count = trace ? traces.load(std::memory_order_relaxed) : 32;
+        if (count < 32 && traces.compare_exchange_strong(count, count + 1, std::memory_order_relaxed))
+            dataLogLn("WPE canvas unused observer bounds skipped");
+        return;
+    }
     IntRect dirtyRect { { }, size() };
     if (rect)
         dirtyRect.intersect(enclosingIntRect(*rect));

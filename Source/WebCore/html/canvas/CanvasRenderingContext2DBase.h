@@ -356,6 +356,7 @@ public:
         String shadowColorString() const;
     };
     const Vector<State, 1>& stateStack() LIFETIME_BOUND;
+    bool hasPendingFullCanvasInvalidation() const { return m_fullCanvasInvalidationPending; }
 
 protected:
     static constexpr auto DefaultFontSize = 10;
@@ -551,6 +552,7 @@ private:
     mutable Variant<CachedContentsTransparent, CachedContentsUnknown, CachedContentsImageData> m_cachedContents;
     CanvasRenderingContext2DSettings m_settings;
     bool m_hasDeferredOperations { false };
+    bool m_fullCanvasInvalidationPending { false };
     mutable bool m_hasCreatedImageBuffer { false };
 #if ENABLE(PIXEL_FORMAT_RGBA16F)
     PlatformDynamicRangeLimit m_dynamicRangeLimit { PlatformDynamicRangeLimit::initialValue() };

@@ -2860,12 +2860,15 @@ void CanvasRenderingContext2DBase::willUpdateContents(std::optional<FloatRect> r
         m_dirtyRect.unite(dirtyRect);
 #endif
         protect(canvasBase())->willUpdateContents(m_dirtyRect, shouldApplyPostProcessing);
+        if (!m_fullCanvasInvalidationPending && m_dirtyRect.contains(backingStoreBounds()))
+            m_fullCanvasInvalidationPending = true;
     }
 }
 
 void CanvasRenderingContext2DBase::clearAccumulatedDirtyRect()
 {
     m_dirtyRect = { };
+    m_fullCanvasInvalidationPending = false;
 }
 
 bool CanvasRenderingContext2DBase::isEntireBackingStoreDirty() const
@@ -2914,6 +2917,7 @@ void CanvasRenderingContext2DBase::prepareForDisplay()
 {
     if (RefPtr buffer = this->buffer())
         buffer->prepareForDisplay();
+    clearAccumulatedDirtyRect();
 }
 
 bool CanvasRenderingContext2DBase::delegatesDisplay() const
