@@ -61,6 +61,7 @@ private:
     void overlayScrollbarAnimationTimerFired();
     void showOverlayScrollbars();
     void hideOverlayScrollbars();
+    bool hasPaintedOverlayScrollbar() const;
     void updateOverlayScrollbarsOpacity();
 
     Scrollbar* m_horizontalOverlayScrollbar { nullptr };

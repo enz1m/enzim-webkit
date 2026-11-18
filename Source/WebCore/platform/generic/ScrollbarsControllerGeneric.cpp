@@ -154,6 +154,14 @@ void ScrollbarsControllerGeneric::overlayScrollbarAnimationTimerFired()
         hideOverlayScrollbars();
 }
 
+// Scrollbars hidden by `scrollbar-width: none` never paint, so fading them only
+// keeps the compositor producing identical frames.
+bool ScrollbarsControllerGeneric::hasPaintedOverlayScrollbar() const
+{
+    return (m_verticalOverlayScrollbar && !m_verticalOverlayScrollbar->isHiddenByStyle())
+        || (m_horizontalOverlayScrollbar && !m_horizontalOverlayScrollbar->isHiddenByStyle());
+}
+
 void ScrollbarsControllerGeneric::showOverlayScrollbars()
 {
     if (m_overlayScrollbarsLocked)
@@ -163,7 +171,7 @@ void ScrollbarsControllerGeneric::showOverlayScrollbars()
         return;
     m_overlayScrollbarAnimationTimer.stop();
 
-    if (!m_horizontalOverlayScrollbar && !m_verticalOverlayScrollbar)
+    if (!hasPaintedOverlayScrollbar())
         return;
 
     m_overlayScrollbarAnimationSource = m_overlayScrollbarAnimationCurrent;
@@ -182,7 +190,7 @@ void ScrollbarsControllerGeneric::hideOverlayScrollbars()
         return;
     m_overlayScrollbarAnimationTimer.stop();
 
-    if (!m_horizontalOverlayScrollbar && !m_verticalOverlayScrollbar)
+    if (!hasPaintedOverlayScrollbar())
         return;
 
     m_overlayScrollbarAnimationSource = m_overlayScrollbarAnimationCurrent;
@@ -190,7 +198,8 @@ void ScrollbarsControllerGeneric::hideOverlayScrollbars()
     if (m_overlayScrollbarAnimationTarget == m_overlayScrollbarAnimationCurrent)
         return;
     m_overlayScrollbarAnimationStartTime = MonotonicTime::now() + overflowScrollbarsAnimationHideDelay;
-    m_overlayScrollbarAnimationEndTime = m_overlayScrollbarAnimationStartTime + overflowScrollbarsAnimationDuration + overflowScrollbarsAnimationHideDelay;
+    // The start already includes the hide delay; the fade itself lasts one duration.
+    m_overlayScrollbarAnimationEndTime = m_overlayScrollbarAnimationStartTime + overflowScrollbarsAnimationDuration;
     m_overlayScrollbarAnimationTimer.startOneShot(overflowScrollbarsAnimationHideDelay);
 }
 
