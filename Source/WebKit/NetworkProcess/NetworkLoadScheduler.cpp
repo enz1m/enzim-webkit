@@ -128,13 +128,17 @@ private:
     void start(NetworkLoad&, bool deferUntilNextTurn = false);
     bool allowsH2Budget() const
     {
-        static const bool guardParsing = [] {
-            const char* value = getenv("WPE_H2_PARSER_GUARD");
-            return !value || *value != '0';
+        // Images on a confirmed HTTP/2 origin load beside the document instead of one at a
+        // time behind it: over one multiplexed connection the legacy window only serialized
+        // them, a round trip each. WPE_H2_DOCUMENT_GUARD=1 holds the budget back again until
+        // the document has arrived and been parsed. A large critical transfer still narrows
+        // the window in shouldDelayLowPriority().
+        static const bool guardDocument = [] {
+            const char* value = getenv("WPE_H2_DOCUMENT_GUARD");
+            return value && *value == '1';
         }();
         return h2LowPriorityBudgetEnabled()
-            && (!guardParsing || m_parsingComplete)
-            && !m_mainResourceInFlight;
+            && (!guardDocument || (m_parsingComplete && !m_mainResourceInFlight));
     }
     bool usesH2Budget(const NetworkLoad& load) const
     {
