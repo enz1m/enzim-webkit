@@ -131,6 +131,7 @@
 #include <WebCore/LegacySchemeRegistry.h>
 #include <WebCore/LocalDOMWindow.h>
 #include <WebCore/LocalFrame.h>
+#include <WebCore/LocalFrameInlines.h>
 #include <WebCore/MemoryCache.h>
 #include <WebCore/MemoryRelease.h>
 #include <WebCore/MessagePort.h>
@@ -138,6 +139,18 @@
 #include <WebCore/NavigatorGamepad.h>
 #include <WebCore/Notification.h>
 #include <WebCore/Page.h>
+#include <WebCore/ProgressTracker.h>
+#include <wtf/MemoryFootprint.h>
+#if PLATFORM(WPE) && !USE(SYSTEM_MALLOC)
+#include <bmalloc/BPlatform.h>
+#if BUSE(LIBPAS)
+// libpas metadata headers perform checked pointer arithmetic over allocator-owned pages.
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+#include <bmalloc/pas_all_heaps.h>
+#include <bmalloc/pas_heap_lock.h>
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+#endif
+#endif
 #include <WebCore/PageGroup.h>
 #include <WebCore/PermissionController.h>
 #include <WebCore/PlatformKeyboardEvent.h>
@@ -1875,6 +1888,85 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
         updateCPUMonitorState(CPUMonitorUpdateReason::VisibilityHasChanged);
 #if OS(LINUX)
         HighPriorityThreads::singleton().setEnabled(hasVisibleWebPage());
+#endif
+#if PLATFORM(WPE)
+        // A process whose pages have all been hidden for a while gives back what costs nothing to
+        // show again: bytecode and compiled code, which are by far the largest part, decoded
+        // images and script text, resources nothing references and caches of derived data. Style, layout and tiles
+        // stay, so the page is on screen again without being recomputed; a script is parsed again
+        // when it next runs. A page that is loading or playing is using what the trim would take,
+        // and is asked again later. A process whose pages are all still blank is one kept ready for
+        // the next navigation: it has nothing to give back, and a trim would land on that
+        // navigation. WPE_HIDDEN_PROCESS_TRIM_SECONDS sets the delay; 0 disables it.
+        static const Seconds trimDelay = [] {
+            const char* value = getenv("WPE_HIDDEN_PROCESS_TRIM_SECONDS");
+            return Seconds { value ? std::max(0.0, atof(value)) : 8.0 };
+        }();
+        static WebCore::Timer* trimTimer;
+        if (!trimTimer) {
+            trimTimer = new WebCore::Timer([] {
+                Ref process = WebProcess::singleton();
+                if (process->hasVisibleWebPage())
+                    return;
+                bool busy = false;
+                bool hasContent = false;
+                Page::forEachPage([&](Page& page) {
+                    busy |= page.progress().isMainLoadProgressing()
+                        || page.mediaState().containsAny({ MediaProducerMediaState::IsPlayingAudio, MediaProducerMediaState::IsPlayingVideo });
+                    RefPtr mainFrame = page.localMainFrame();
+                    RefPtr document = mainFrame ? mainFrame->document() : nullptr;
+                    hasContent |= document && !document->url().isAboutBlank();
+                });
+                if (!hasContent)
+                    return;
+                if (busy) {
+                    trimTimer->startOneShot(trimDelay);
+                    return;
+                }
+                // WPE_HIDDEN_PROCESS_TRIM_TRACE=1 reports what the trim gave back and what the process
+                // still holds, by the engine's own accounts.
+                static const bool trace = [] {
+                    const char* value = getenv("WPE_HIDDEN_PROCESS_TRIM_TRACE");
+                    return value && *value == '1';
+                }();
+                size_t footprintBefore = trace ? WTF::memoryFootprint() : 0;
+                WebCore::releaseMemory(Critical::No, Synchronous::Yes, MaintainBackForwardCache::Yes, MaintainMemoryCache::No);
+                process->destroyDecodedDataForAllImages();
+                // Decoded script text too: with the code gone nothing reads it until a script is
+                // parsed again, and the cache decodes it again from the bytes it keeps.
+                MemoryCache::singleton().pruneLiveResourcesToSize(0, true);
+                GarbageCollectionController::singleton().deleteAllCode(JSC::DeleteAllCodeIfNotCollecting);
+                GarbageCollectionController::singleton().garbageCollectNow();
+                WTF::releaseFastMallocFreeMemory();
+                process->releaseSystemMallocMemory();
+                if (trace) {
+                    size_t allocated = 0;
+                    size_t committed = 0;
+#if !USE(SYSTEM_MALLOC) && BUSE(LIBPAS)
+                    pas_heap_lock_lock();
+                    auto summary = pas_all_heaps_compute_total_non_utility_summary();
+                    pas_heap_lock_unlock();
+                    allocated = summary.allocated;
+                    committed = summary.committed;
+#endif
+                    Ref vm = commonVM();
+                    JSC::JSLockHolder lock(vm);
+                    auto cache = MemoryCache::singleton().getStatistics();
+                    size_t footprint = WTF::memoryFootprint();
+                    WTFLogAlways("WPE_HIDDEN_TRIM pid=%d freedK=%lld footprintK=%zu allocatorAllocatedK=%zu allocatorCommittedK=%zu jsHeapK=%zu jsCapacityK=%zu jsExtraK=%zu jsObjects=%zu jitK=%zu imagesK=%d imagesDecodedK=%d scriptsK=%d scriptsDecodedK=%d cssK=%d fontsK=%d documents=%u",
+                        getpid(), static_cast<long long>((static_cast<int64_t>(footprintBefore) - static_cast<int64_t>(footprint)) / 1024), footprint / 1024,
+                        allocated / 1024, committed / 1024, vm->heap.size() / 1024, vm->heap.capacity() / 1024, vm->heap.extraMemorySize() / 1024, vm->heap.objectCount(),
+                        JSC::globalMemoryStatistics().JITBytes / 1024, cache.images.size / 1024, cache.images.decodedSize / 1024, cache.scripts.size / 1024, cache.scripts.decodedSize / 1024,
+                        cache.cssStyleSheets.size / 1024, cache.fonts.size / 1024, static_cast<unsigned>(Document::allDocuments().size()));
+                }
+            });
+        }
+        if (trimDelay > 0_s) {
+            if (hasVisibleWebPage())
+                trimTimer->stop();
+            else
+                trimTimer->startOneShot(trimDelay);
+        }
 #endif
     }
 }
