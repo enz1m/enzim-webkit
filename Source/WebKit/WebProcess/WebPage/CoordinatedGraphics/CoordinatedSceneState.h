@@ -59,6 +59,7 @@ public:
     void invalidate();
 
     void invalidateCommittedLayers();
+    void discardTiles();
 
     bool layersDidChange() const { return m_didChangeLayers; }
 

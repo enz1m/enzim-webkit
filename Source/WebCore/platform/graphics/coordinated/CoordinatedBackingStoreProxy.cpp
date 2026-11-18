@@ -109,6 +109,23 @@ void CoordinatedBackingStoreProxy::invalidate()
     setAffectedByTransformAnimation(false);
 }
 
+bool CoordinatedBackingStoreProxy::discardTiles()
+{
+    assertIsMainThread();
+    if (m_tiles.isEmpty())
+        return false;
+
+    Vector<uint32_t> tilesToRemove;
+    for (const auto& tile : m_tiles.values())
+        tilesToRemove.append(tile.id);
+    m_tiles.clear();
+
+    m_pendingTileCreation = true;
+    Locker locker { m_update.lock };
+    m_update.pending.appendUpdate({ }, { }, WTF::move(tilesToRemove));
+    return true;
+}
+
 void CoordinatedBackingStoreProxy::setAffectedByTransformAnimation(bool affectedByTransformAnimation)
 {
     if (affectedByTransformAnimation && !m_animatedBackingStoreClient)

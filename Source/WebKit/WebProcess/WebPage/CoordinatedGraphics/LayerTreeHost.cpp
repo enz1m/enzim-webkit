@@ -616,6 +616,11 @@ void LayerTreeHost::fillGLInformation(RenderProcessInfo&& info, CompletionHandle
 
 void LayerTreeHost::releaseMemory(WTF::Critical critical)
 {
+    // A page that is not shown drops its tiles, as Chromium drops a hidden
+    // tab's tiles; showing it again repaints the visible ones before the
+    // first frame.
+    if (critical == WTF::Critical::Yes && m_isSuspended)
+        m_sceneState->discardTiles();
     PlatformDisplay::sharedDisplay().skiaReleaseUnusedResources(critical);
     m_compositor->releaseMemory(critical);
 }

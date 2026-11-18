@@ -200,6 +200,8 @@ public:
 
     void updateContents(bool affectedByTransformAnimation) WTF_REQUIRES_LOCK(m_lock);
     void updateBackingStore();
+    // Drops the tiles of a page that is not shown; they are repainted when it is.
+    void discardTiles();
 
     void flushPendingState();
     void flushPositionChanges(const OptionSet<CompositionReason>&);

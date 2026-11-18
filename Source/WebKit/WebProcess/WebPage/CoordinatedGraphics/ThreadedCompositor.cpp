@@ -902,11 +902,88 @@ void ThreadedCompositor::fillGLInformation(RenderProcessInfo&& info, CompletionH
     });
 }
 
+// Mesa's Intel driver packs textures of up to 1 MiB into shared slabs, two of
+// the largest entries per slab, and takes freed entries back only when an
+// allocation finds the current slab full; a freed buffer then waits in a cache
+// until another buffer is freed a second or more later. A hidden page
+// allocates nothing, so what it frees stays resident. Allocating and deleting
+// the largest entry of each slab range three times in a row always finds a
+// full slab once, which takes the freed entries back; doing it again after the
+// cache delay, ending with one buffer too large for a slab, empties the cache.
+// At most one slab per range stays behind. Other drivers just see a few
+// short-lived textures.
+static void nudgeDriverToReturnFreedMemory(GLContext& context, bool emptyCache)
+{
+    static const bool disabled = [] {
+        const char* value = getenv("WEBKIT_DISABLE_GPU_MEMORY_RECLAIM");
+        return value && strcmp(value, "0");
+    }();
+    if (disabled)
+        return;
+
+    GLContext::ScopedGLContextCurrent scopedCurrent(context);
+    auto allocateAndDelete = [](int width, int height) {
+        GLuint texture = 0;
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteTextures(1, &texture);
+    };
+    // 4 KiB, 128 KiB and 1 MiB: the largest entry of each slab range.
+    static constexpr std::array<std::pair<int, int>, 3> largestEntries { { { 32, 32 }, { 256, 128 }, { 512, 512 } } };
+    for (auto [width, height] : largestEntries) {
+        for (int i = 0; i < 3; ++i)
+            allocateAndDelete(width, height);
+    }
+    if (emptyCache)
+        allocateAndDelete(640, 512);
+    glFlush();
+}
+
 void ThreadedCompositor::releaseMemory(WTF::Critical critical)
 {
-    m_workQueue->dispatchSync([protectedThis = Ref { *this }, critical] {
+    // A suspended compositor does not render, so it applies tile removals here
+    // for their textures to be freed below.
+    bool applyTileRemovals = m_suspendedCount > 0;
+    m_workQueue->dispatchSync([protectedThis = Ref { *this }, critical, applyTileRemovals] {
+        if (applyTileRemovals) {
+            bool isInvalidated;
+            {
+                Locker locker { protectedThis->m_state.lock };
+                isInvalidated = protectedThis->m_state.state == State::Invalidated;
+            }
+            if (!isInvalidated)
+                protectedThis->m_sceneState->flushCompositingState(CompositionReason::RenderingUpdate);
+        }
         PlatformDisplay::sharedDisplay().skiaReleaseUnusedResources(critical);
+
+        if (!applyTileRemovals || critical != WTF::Critical::Yes)
+            return;
+        if (auto* context = protectedThis->compositingGLContext())
+            nudgeDriverToReturnFreedMemory(*context, false);
+        protectedThis->m_workQueue->dispatchAfter(2500_ms, [protectedThis] {
+            if (auto* context = protectedThis->compositingGLContext())
+                nudgeDriverToReturnFreedMemory(*context, true);
+        });
     });
+}
+
+GLContext* ThreadedCompositor::compositingGLContext()
+{
+    // The context is torn down on this queue only after the state becomes
+    // invalidated, so checking the state here keeps the context alive for
+    // the caller's work on this queue.
+    {
+        Locker locker { m_state.lock };
+        if (m_state.state == State::Invalidated)
+            return nullptr;
+    }
+#if USE(TEXTURE_MAPPER)
+    return m_context.get();
+#else
+    return PlatformDisplay::sharedDisplay().skiaGLContext();
+#endif
 }
 
 } // namespace WebKit

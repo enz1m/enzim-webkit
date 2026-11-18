@@ -4355,6 +4355,15 @@ void MediaPlayerPrivateGStreamer::setViewportVisibility(ViewportVisibility visib
     managePlayerSuspend();
 }
 
+void MediaPlayerPrivateGStreamer::setPageIsVisible(bool visible)
+{
+    if (visible == m_pageIsVisible)
+        return;
+
+    m_pageIsVisible = visible;
+    managePlayerSuspend();
+}
+
 void MediaPlayerPrivateGStreamer::managePlayerSuspend()
 {
     if (!m_pipeline || isMediaStreamPlayer())
@@ -4371,8 +4380,12 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
     });
 
     bool muted = isMuted();
-    bool shouldBeSuspended = (player && player->isVideoPlayer()) && muted && !m_isVisibleInViewport && !allowPlaybackOfInvisibleVideos;
-    GST_INFO_OBJECT(m_pipeline.get(), "%s %s player %svisible in viewport", muted ? "Muted" : "Un-muted", (player && player->isVideoPlayer()) ? "video" : "audio", m_isVisibleInViewport ? "" : "not ");
+    // A silent video in a hidden page is paused by its media session; suspending
+    // it as well releases its decoder, as Chromium suspends paused hidden players.
+    bool silent = muted || !hasAudio();
+    bool isHidden = (muted && !m_isVisibleInViewport) || (silent && !m_pageIsVisible);
+    bool shouldBeSuspended = (player && player->isVideoPlayer()) && isHidden && !allowPlaybackOfInvisibleVideos;
+    GST_INFO_OBJECT(m_pipeline.get(), "%s %s player %svisible in viewport, page %svisible", muted ? "Muted" : "Un-muted", (player && player->isVideoPlayer()) ? "video" : "audio", m_isVisibleInViewport ? "" : "not ", m_pageIsVisible ? "" : "not ");
 
     if (shouldBeSuspended && !isSuspended()) {
         GstState currentState, pendingState;
@@ -4395,6 +4408,12 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
         gst_element_get_state(m_pipeline.get(), &currentState, &pendingState, 0);
         GST_DEBUG_OBJECT(pipeline(), "Pipeline is now in %s state with %s pending", gst_state_get_name(currentState), gst_state_get_name(pendingState));
         m_isPipelinePlaying = false;
+#if USE(GSTREAMER_GL)
+        // The last decoded frame keeps a hardware decoder's whole surface pool
+        // alive; keep a copy of it instead so that the decoder memory is freed.
+        if (targetState < GST_STATE_PAUSED)
+            flushCurrentBuffer();
+#endif
     } else if (!shouldBeSuspended && isSuspended()) {
         m_isSuspended = false;
 

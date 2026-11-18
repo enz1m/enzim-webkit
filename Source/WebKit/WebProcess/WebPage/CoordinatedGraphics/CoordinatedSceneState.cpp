@@ -159,6 +159,18 @@ void CoordinatedSceneState::invalidateCommittedLayers()
     }
 }
 
+void CoordinatedSceneState::discardTiles()
+{
+    ASSERT(isMainRunLoop());
+    HashSet<Ref<CoordinatedPlatformLayer>> layers;
+    {
+        Locker locker { m_layersLock };
+        layers = m_layers;
+    }
+    for (Ref layer : layers)
+        layer->discardTiles();
+}
+
 void CoordinatedSceneState::invalidate()
 {
     ASSERT(isMainRunLoop());

@@ -943,6 +943,17 @@ void CoordinatedPlatformLayer::updateBackingStore()
         notifyCompositionRequired();
 }
 
+void CoordinatedPlatformLayer::discardTiles()
+{
+    assertIsMainThread();
+    {
+        Locker locker { m_lock };
+        if (!m_backingStoreProxy || !m_backingStoreProxy->discardTiles())
+            return;
+    }
+    m_needsTilesUpdate = true;
+}
+
 void CoordinatedPlatformLayer::updateContents(bool affectedByTransformAnimation)
 {
     assertIsMainThread();

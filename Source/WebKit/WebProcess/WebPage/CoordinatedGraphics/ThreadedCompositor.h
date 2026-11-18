@@ -120,6 +120,7 @@ public:
 #endif
 
 private:
+    WebCore::GLContext* compositingGLContext();
     ThreadedCompositor(WebPage&, LayerTreeHost&, CoordinatedSceneState&);
 
     void startRenderTimer();

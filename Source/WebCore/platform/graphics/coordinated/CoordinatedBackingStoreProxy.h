@@ -49,6 +49,8 @@ public:
     CoordinatedAnimatedBackingStoreClient* animatedBackingStoreClient() const { return m_animatedBackingStoreClient.get(); }
 
     void invalidate();
+    // Drops every tile; the next update recreates and repaints the visible ones.
+    bool discardTiles();
 
     class Update {
         WTF_MAKE_NONCOPYABLE(Update);
