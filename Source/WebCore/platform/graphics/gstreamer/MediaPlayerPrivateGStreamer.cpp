@@ -5152,6 +5152,43 @@ std::pair<String, GRefPtr<GstDevice>> MediaPlayerPrivateGStreamer::resolveAudioO
 }
 #endif
 
+// PipeWire refuses to move the stream of a sandboxed client to another device
+// but lets it open one there, so a sink that already has a stream reopens it:
+// at its next buffer, upstream is held while the sink goes through READY, is
+// given the device (no device for the default output) and returns to its
+// parent's state. The device is set again there because pulsesink records the
+// sink its stream reached, which can overwrite a device set just after the
+// stream opened. The clock the sink provided is lost and the player selects
+// one again (GST_MESSAGE_CLOCK_LOST).
+static void reopenAudioSinkStream(GstElement* sink, const GRefPtr<GstDevice>& device)
+{
+    GstState state;
+    gst_element_get_state(sink, &state, nullptr, 0);
+    if (state <= GST_STATE_READY)
+        return;
+    GRefPtr pad = adoptGRef(gst_element_get_static_pad(sink, "sink"));
+    GRefPtr peer = pad ? adoptGRef(gst_pad_get_peer(pad.get())) : nullptr;
+    if (!peer)
+        return;
+    struct Reopen {
+        GRefPtr<GstElement> sink;
+        GRefPtr<GstDevice> device;
+    };
+    auto type = static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST);
+    gst_pad_add_probe(peer.get(), type, [](GstPad*, GstPadProbeInfo*, gpointer userData) -> GstPadProbeReturn {
+        auto& reopen = *static_cast<Reopen*>(userData);
+        gst_element_set_state(reopen.sink.get(), GST_STATE_READY);
+        if (reopen.device)
+            gst_device_reconfigure_element(reopen.device.get(), reopen.sink.get());
+        else
+            g_object_set(reopen.sink.get(), "device", nullptr, nullptr);
+        gst_element_sync_state_with_parent(reopen.sink.get());
+        return GST_PAD_PROBE_REMOVE;
+    }, new Reopen { GRefPtr(sink), device }, [](gpointer userData) {
+        delete static_cast<Reopen*>(userData);
+    });
+}
+
 bool MediaPlayerPrivateGStreamer::applyAudioSinkDevice(GstElement* audioSink, const GRefPtr<GstDevice>& device, const String& deviceId)
 {
     bool changed = false;
@@ -5179,7 +5216,19 @@ bool MediaPlayerPrivateGStreamer::applyAudioSinkDevice(GstElement* audioSink, co
 #endif
     }
 
+    if (!device) {
+        // Back to the default output: a sink that names its device forgets it.
+        if (!gstObjectHasProperty(audioSink, "device"))
+            return false;
+        g_object_set(audioSink, "device", nullptr, nullptr);
+        reopenAudioSinkStream(audioSink, { });
+        GST_DEBUG_OBJECT(pipeline(), "Element '%s' back on the default device.", GST_ELEMENT_NAME(audioSink));
+        return true;
+    }
+
     changed = !!gst_device_reconfigure_element(device.get(), audioSink);
+    if (changed)
+        reopenAudioSinkStream(audioSink, device);
     GST_DEBUG_OBJECT(pipeline(), "%s element '%s' with device %s<%p>.", changed ? "Reconfigured" : "Skipped", GST_ELEMENT_NAME(audioSink), GST_OBJECT_NAME(device.get()), device.get());
     return changed;
 }
