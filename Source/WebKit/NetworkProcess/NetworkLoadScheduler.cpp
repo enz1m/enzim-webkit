@@ -81,6 +81,19 @@ static bool criticalWindowEnabled()
 #endif
 }
 
+static bool visibleCriticalWindowEnabled()
+{
+#if PLATFORM(WPE)
+    static const bool enabled = [] {
+        const char* value = getenv("WPE_H2_VISIBLE_CRITICAL_WINDOW");
+        return !value || *value != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 class NetworkLoadScheduler::HostContext {
     WTF_MAKE_TZONE_ALLOCATED(NetworkLoadScheduler::HostContext);
 public:
@@ -192,10 +205,17 @@ bool NetworkLoadScheduler::HostContext::shouldDelayLowPriority(const NetworkLoad
         const auto& request = active->currentRequest();
         if (guardCritical && active->currentRequest().url().protocolHostAndPort() == origin) {
             ++sameOriginActiveCount;
-            hasCriticalTransfer |= m_largeBodies.contains(active) && request.priority() >= WebCore::ResourceLoadPriority::High
+            auto minimumPriority = visibleCriticalWindowEnabled() ? WebCore::ResourceLoadPriority::Medium : WebCore::ResourceLoadPriority::High;
+            hasCriticalTransfer |= m_largeBodies.contains(active) && request.priority() >= minimumPriority
                 && request.requester() == WebCore::ResourceRequestRequester::Unspecified;
-            if (hasCriticalTransfer && sameOriginActiveCount >= maximumActiveCountForLowPriority)
+            if (hasCriticalTransfer && sameOriginActiveCount >= maximumActiveCountForLowPriority) {
+                static unsigned traceBudget = 32;
+                if (getenv("WPE_H2_VISIBLE_CRITICAL_TRACE") && traceBudget) {
+                    --traceBudget;
+                    dataLogLn("WPE_H2_VISIBLE_CRITICAL delay priority=", static_cast<unsigned>(load.currentRequest().priority()), " threshold=", static_cast<unsigned>(minimumPriority), " sameOriginActive=", sameOriginActiveCount);
+                }
                 return true;
+            }
         }
         if (request.priority() <= WebCore::ResourceLoadPriority::Low)
             ++lowPriorityCount;
@@ -245,6 +265,11 @@ void NetworkLoadScheduler::HostContext::prioritize(NetworkLoad& load)
 {
     auto priority = load.parameters().request.priority();
     load.reprioritizeRequest(++priority);
+    static unsigned traceBudget = 32;
+    if (getenv("WPE_H2_VISIBLE_CRITICAL_TRACE") && traceBudget) {
+        --traceBudget;
+        dataLogLn("WPE_H2_VISIBLE_CRITICAL prioritize priority=", static_cast<unsigned>(priority), " requester=", static_cast<unsigned>(load.currentRequest().requester()), " large=", m_largeBodies.contains(load));
+    }
 
     if (!m_pendingLoads.remove(load)) {
         if (usesH2Budget(load))
@@ -318,6 +343,11 @@ void NetworkLoadScheduler::didReceiveResponse(NetworkLoad& load, const WebCore::
         return;
     if (auto* context = contextForLoad(load))
         context->noteLargeBody(load);
+    static unsigned traceBudget = 32;
+    if (getenv("WPE_H2_VISIBLE_CRITICAL_TRACE") && traceBudget) {
+        --traceBudget;
+        dataLogLn("WPE_H2_VISIBLE_CRITICAL response priority=", static_cast<unsigned>(load.currentRequest().priority()), " requester=", static_cast<unsigned>(load.currentRequest().requester()), " status=", response.httpStatusCode(), " bytes=", response.expectedContentLength());
+    }
 }
 
 void NetworkLoadScheduler::schedule(NetworkLoad& load)
