@@ -131,7 +131,7 @@ messages -> NetworkConnectionToWebProcess WantsDispatchMessage {
     CheckInWebProcess(struct WebKit::CoreIPCAuditToken auditToken)
 #endif
 #endif
-    SetResourceLoadSchedulingMode(WebCore::PageIdentifier webPageID, enum:uint8_t WebCore::LoadSchedulingMode mode)
+    SetResourceLoadSchedulingMode(WebCore::PageIdentifier webPageID, enum:uint8_t WebCore::LoadSchedulingMode mode, bool parsingComplete)
     PrioritizeResourceLoads(Vector<WebCore::ResourceLoaderIdentifier> loadIdentifiers)
 
 #if ENABLE(CONTENT_FILTERING)

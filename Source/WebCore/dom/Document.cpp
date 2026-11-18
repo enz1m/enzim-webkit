@@ -4663,7 +4663,26 @@ void Document::implicitClose()
 
 void Document::setParsing(bool b)
 {
+    bool changed = m_bParsing != b;
     m_bParsing = b;
+#if PLATFORM(WPE)
+    static const bool publishParsingState = [] {
+        const char* budget = getenv("WPE_H2_LOW_PRIORITY_BUDGET");
+        const char* guard = getenv("WPE_H2_PARSER_GUARD");
+        return (!budget || *budget != '0') && (!guard || *guard != '0');
+    }();
+    static const bool prePaintGuard = [] {
+        const char* value = getenv("WPE_H2_PREPAINT_GUARD");
+        return !value || *value != '0';
+    }();
+    bool canPublishParsingCompletion = b || !prePaintGuard || !m_didEnqueueFirstContentfulPaint;
+    if (publishParsingState && canPublishParsingCompletion && changed && frame() && frame()->isMainFrame() && frame()->document() == this) {
+        if (RefPtr page = this->page(); page && page->identifier())
+            platformStrategies()->loaderStrategy()->setResourceLoadSchedulingMode(*page, page->loadSchedulingMode());
+    }
+#else
+    UNUSED_PARAM(changed);
+#endif
 
     if (m_bParsing && !m_sharedObjectPool)
         m_sharedObjectPool = makeUnique<DocumentSharedObjectPool>(protect(securityOrigin()));

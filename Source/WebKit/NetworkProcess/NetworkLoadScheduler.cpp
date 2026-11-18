@@ -53,6 +53,19 @@ static bool pendingCacheWakeEnabled()
 #endif
 }
 
+static bool h2LowPriorityBudgetEnabled()
+{
+#if PLATFORM(WPE)
+    static const bool enabled = [] {
+        const char* value = getenv("WPE_H2_LOW_PRIORITY_BUDGET");
+        return !value || *value != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 class NetworkLoadScheduler::HostContext {
     WTF_MAKE_TZONE_ALLOCATED(NetworkLoadScheduler::HostContext);
 public:
@@ -63,14 +76,49 @@ public:
     void unschedule(NetworkLoad&);
     void prioritize(NetworkLoad&);
     void appendPendingForURL(const URL&, Vector<Ref<NetworkLoad>>&) const;
+    void noteProtocol(const NetworkLoad&, const String&);
+    void setParsingComplete(bool value)
+    {
+        if (m_parsingComplete == value)
+            return;
+        m_parsingComplete = value;
+        if (value && allowsH2Budget())
+            drainPending();
+    }
+    void setMainResourceInFlight(bool value)
+    {
+        if (m_mainResourceInFlight == value)
+            return;
+        m_mainResourceInFlight = value;
+        if (!value && allowsH2Budget())
+            drainPending();
+    }
     void removePending(NetworkLoad& load) { m_pendingLoads.remove(load); }
 
 private:
     void start(NetworkLoad&, bool deferUntilNextTurn = false);
-    bool shouldDelayLowPriority() const { return m_activeLoads.computeSize() >= maximumActiveCountForLowPriority; }
+    bool allowsH2Budget() const
+    {
+        static const bool guardParsing = [] {
+            const char* value = getenv("WPE_H2_PARSER_GUARD");
+            return !value || *value != '0';
+        }();
+        return h2LowPriorityBudgetEnabled()
+            && (!guardParsing || m_parsingComplete)
+            && !m_mainResourceInFlight;
+    }
+    bool usesH2Budget(const NetworkLoad& load) const
+    {
+        return allowsH2Budget() && m_http2Origins.contains(load.url().protocolHostAndPort());
+    }
+    bool shouldDelayLowPriority(const NetworkLoad&) const;
+    void drainPending();
 
     WeakHashSet<NetworkLoad> m_activeLoads;
     WeakListHashSet<NetworkLoad> m_pendingLoads;
+    HashSet<String> m_http2Origins;
+    bool m_mainResourceInFlight { false };
+    bool m_parsingComplete { false };
 };
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkLoadScheduler::HostContext);
@@ -85,7 +133,7 @@ void NetworkLoadScheduler::HostContext::schedule(NetworkLoad& load)
         if (request.isConditional())
             return true;
 
-        if (!shouldDelayLowPriority())
+        if (!shouldDelayLowPriority(load))
             return true;
 
         return false;
@@ -104,11 +152,56 @@ void NetworkLoadScheduler::HostContext::unschedule(NetworkLoad& load)
     m_activeLoads.remove(load);
     m_pendingLoads.remove(load);
 
-    if (shouldDelayLowPriority())
-        return;
+    drainPending();
+}
 
-    if (RefPtr firstPendingLoad = m_pendingLoads.tryTakeFirst())
-        start(*firstPendingLoad, pendingCacheWakeEnabled());
+bool NetworkLoadScheduler::HostContext::shouldDelayLowPriority(const NetworkLoad& load) const
+{
+    if (!usesH2Budget(load))
+        return m_activeLoads.computeSize() >= maximumActiveCountForLowPriority;
+
+    size_t lowPriorityCount = 0;
+    for (Ref active : m_activeLoads) {
+        if (active->currentRequest().priority() <= WebCore::ResourceLoadPriority::Low && ++lowPriorityCount >= maximumActiveCountForLowPriority)
+            return true;
+    }
+    static unsigned traceBudget = 32;
+    if (getenv("WPE_H2_LOW_PRIORITY_BUDGET_TRACE") && traceBudget && m_activeLoads.computeSize() >= maximumActiveCountForLowPriority) {
+        --traceBudget;
+        dataLogLn("WPE confirmed H2 admits low priority alongside active=", m_activeLoads.computeSize(), " low=", lowPriorityCount);
+    }
+    return false;
+}
+
+void NetworkLoadScheduler::HostContext::drainPending()
+{
+    while (m_pendingLoads.begin() != m_pendingLoads.end()) {
+        Ref load = *m_pendingLoads.begin();
+        if (shouldDelayLowPriority(load))
+            return;
+        bool useH2Budget = usesH2Budget(load);
+        m_pendingLoads.remove(load);
+        start(load, pendingCacheWakeEnabled());
+        if (!useH2Budget)
+            return;
+    }
+}
+
+void NetworkLoadScheduler::HostContext::noteProtocol(const NetworkLoad& load, const String& protocol)
+{
+    if (!h2LowPriorityBudgetEnabled())
+        return;
+    auto origin = load.url().protocolHostAndPort();
+    if (protocol != "h2"_s) {
+        m_http2Origins.remove(origin);
+        return;
+    }
+    constexpr size_t maximumTrackedOriginsPerHost = 8;
+    if (!m_http2Origins.contains(origin) && m_http2Origins.size() >= maximumTrackedOriginsPerHost)
+        m_http2Origins.remove(m_http2Origins.random());
+    m_http2Origins.add(origin);
+    if (usesH2Budget(load))
+        drainPending();
 }
 
 void NetworkLoadScheduler::HostContext::prioritize(NetworkLoad& load)
@@ -116,8 +209,11 @@ void NetworkLoadScheduler::HostContext::prioritize(NetworkLoad& load)
     auto priority = load.parameters().request.priority();
     load.reprioritizeRequest(++priority);
 
-    if (!m_pendingLoads.remove(load))
+    if (!m_pendingLoads.remove(load)) {
+        if (usesH2Budget(load))
+            drainPending();
         return;
+    }
 
     start(load);
 }
@@ -189,7 +285,22 @@ void NetworkLoadScheduler::schedule(NetworkLoad& load)
 
 void NetworkLoadScheduler::unschedule(NetworkLoad& load, const WebCore::NetworkLoadMetrics* metrics)
 {
+    if (metrics && h2LowPriorityBudgetEnabled() && load.parameters().webPageID) {
+        if (auto* context = contextForLoad(load))
+            context->noteProtocol(load, metrics->protocol);
+    }
     bool isMainFrameMainResource = load.currentRequest().isTopSite();
+    if (isMainFrameMainResource && h2LowPriorityBudgetEnabled() && load.parameters().webPageID) {
+        auto pageIdentifier = *load.parameters().webPageID;
+        auto it = m_mainResourceLoads.find(pageIdentifier);
+        if (it != m_mainResourceLoads.end() && it->value.get() == &load) {
+            m_mainResourceLoads.remove(it);
+            if (auto* pageContext = m_pageContexts.get(pageIdentifier)) {
+                for (auto& entry : *pageContext)
+                    entry.value->setMainResourceInFlight(false);
+            }
+        }
+    }
     if (isMainFrameMainResource)
         unscheduleMainResourceLoad(load, metrics);
     else
@@ -223,6 +334,17 @@ static std::tuple<String, String> mainResourceLoadKey(const String& protocolHost
 
 void NetworkLoadScheduler::scheduleMainResourceLoad(NetworkLoad& load)
 {
+    if (h2LowPriorityBudgetEnabled() && load.parameters().webPageID) {
+        auto pageIdentifier = *load.parameters().webPageID;
+        m_mainResourceLoads.set(pageIdentifier, WeakPtr { load });
+        m_parsedPages.remove(pageIdentifier);
+        if (auto* pageContext = m_pageContexts.get(pageIdentifier)) {
+            for (auto& entry : *pageContext) {
+                entry.value->setParsingComplete(false);
+                entry.value->setMainResourceInFlight(true);
+            }
+        }
+    }
     String protocolHostAndPort = load.url().protocolHostAndPort();
     if (!isOriginHTTP1X(protocolHostAndPort)) {
         load.start();
@@ -319,15 +441,24 @@ void NetworkLoadScheduler::updateOriginProtocolInfo(const String& protocolHostAn
     m_http1XOrigins.add(protocolHostAndPort);
 }
 
-void NetworkLoadScheduler::setResourceLoadSchedulingMode(WebCore::PageIdentifier pageIdentifier, WebCore::LoadSchedulingMode mode)
+void NetworkLoadScheduler::setResourceLoadSchedulingMode(WebCore::PageIdentifier pageIdentifier, WebCore::LoadSchedulingMode mode, bool parsingComplete)
 {
     switch (mode) {
     case WebCore::LoadSchedulingMode::Prioritized:
         m_pageContexts.ensure(pageIdentifier, [&] {
             return makeUnique<PageContext>();
         });
+        if (h2LowPriorityBudgetEnabled()) {
+            if (parsingComplete)
+                m_parsedPages.add(pageIdentifier);
+            else
+                m_parsedPages.remove(pageIdentifier);
+            for (auto& entry : *m_pageContexts.get(pageIdentifier))
+                entry.value->setParsingComplete(parsingComplete);
+        }
         break;
     case WebCore::LoadSchedulingMode::Direct:
+        m_parsedPages.remove(pageIdentifier);
         m_pageContexts.remove(pageIdentifier);
         break;
     }
@@ -343,6 +474,8 @@ void NetworkLoadScheduler::prioritizeLoads(const Vector<Ref<NetworkLoad>>& loads
 
 void NetworkLoadScheduler::clearPageData(WebCore::PageIdentifier pageIdentifier)
 {
+    m_mainResourceLoads.remove(pageIdentifier);
+    m_parsedPages.remove(pageIdentifier);
     m_pageContexts.remove(pageIdentifier);
 }
 
@@ -356,9 +489,12 @@ auto NetworkLoadScheduler::contextForLoad(const NetworkLoad& load) -> HostContex
         return nullptr;
 
     auto host = load.url().host().toString();
-    return pageContext->ensure(host, [&] {
+    auto* context = pageContext->ensure(host, [&] {
         return makeUnique<HostContext>();
     }).iterator->value.get();
+    context->setMainResourceInFlight(!!m_mainResourceLoads.get(*load.parameters().webPageID));
+    context->setParsingComplete(m_parsedPages.contains(*load.parameters().webPageID));
+    return context;
 }
 
 }

@@ -60,7 +60,7 @@ public:
     void startedPreconnectForMainResource(const URL&, const String& userAgent);
     void finishedPreconnectForMainResource(const URL&, const String& userAgent, const WebCore::ResourceError&);
 
-    void setResourceLoadSchedulingMode(WebCore::PageIdentifier, WebCore::LoadSchedulingMode);
+    void setResourceLoadSchedulingMode(WebCore::PageIdentifier, WebCore::LoadSchedulingMode, bool parsingComplete);
     void prioritizeLoads(const Vector<Ref<NetworkLoad>>&);
     void cachedResourceBecameAvailable(const URL&);
     void clearPageData(WebCore::PageIdentifier);
@@ -93,7 +93,9 @@ private:
 
     void maybePrunePreconnectInfo(PendingPreconnectMap::iterator&);
 
+    HashSet<WebCore::PageIdentifier> m_parsedPages;
     HashSet<String> m_http1XOrigins;
+    HashMap<WebCore::PageIdentifier, WeakPtr<NetworkLoad>> m_mainResourceLoads;
 };
 
 }

@@ -2035,13 +2035,13 @@ void NetworkConnectionToWebProcess::dropNonSerializableInProcessCache(WebCore::P
         connection->m_connection->send(Messages::NetworkProcessConnection::DropNonSerializableInProcessCache(identifier), 0);
 }
 
-void NetworkConnectionToWebProcess::setResourceLoadSchedulingMode(WebCore::PageIdentifier pageIdentifier, WebCore::LoadSchedulingMode mode)
+void NetworkConnectionToWebProcess::setResourceLoadSchedulingMode(WebCore::PageIdentifier pageIdentifier, WebCore::LoadSchedulingMode mode, bool parsingComplete)
 {
     CheckedPtr session = networkSession();
     if (!session)
         return;
 
-    protect(session->networkLoadScheduler())->setResourceLoadSchedulingMode(pageIdentifier, mode);
+    protect(session->networkLoadScheduler())->setResourceLoadSchedulingMode(pageIdentifier, mode, parsingComplete);
 }
 
 void NetworkConnectionToWebProcess::prioritizeResourceLoads(const Vector<WebCore::ResourceLoaderIdentifier>& loadIdentifiers)

@@ -1122,7 +1122,9 @@ bool WebLoaderStrategy::havePerformedSecurityChecks(const ResourceResponse& resp
 void WebLoaderStrategy::setResourceLoadSchedulingMode(WebCore::Page& page, WebCore::LoadSchedulingMode mode)
 {
     auto& connection = WebProcess::singleton().ensureNetworkProcessConnection().connection();
-    connection.send(Messages::NetworkConnectionToWebProcess::SetResourceLoadSchedulingMode(WebPage::fromCorePage(page)->identifier(), mode), 0);
+    RefPtr document = page.localTopDocument();
+    bool parsingComplete = document && !document->parsing();
+    connection.send(Messages::NetworkConnectionToWebProcess::SetResourceLoadSchedulingMode(WebPage::fromCorePage(page)->identifier(), mode, parsingComplete), 0);
 }
 
 void WebLoaderStrategy::prioritizeResourceLoads(const Vector<Ref<WebCore::SubresourceLoader>>& resources)
