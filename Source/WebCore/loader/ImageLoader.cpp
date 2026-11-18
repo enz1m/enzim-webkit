@@ -61,6 +61,7 @@
 #include "RenderSVGImage.h"
 #include "Settings.h"
 #include <JavaScriptCore/HeapCellInlines.h>
+#include <wtf/DataLog.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/Scope.h>
 #include <wtf/text/MakeString.h>
@@ -314,6 +315,22 @@ void ImageLoader::updateFromElement(RelevantMutation relevantMutation)
                 m_lazyImageLoadState = LazyImageLoadState::Deferred;
                 request.setIgnoreForRequestCount(true);
             }
+        }
+        static const bool preserveLazyImageExemption = [] {
+            if (const char* value = getenv("WPE_LAZY_IMAGE_ACCOUNTING"))
+                return *value != '0';
+    #if PLATFORM(WPE)
+            return true;
+    #else
+            return false;
+    #endif
+        }();
+        if (preserveLazyImageExemption && imageElement && imageElement->isLazyLoadable() && document->settings().lazyImageLoadingEnabled() && !request.ignoreForRequestCount()) {
+            request.setIgnoreForRequestCount(true);
+            static const bool trace = StringView::fromLatin1(getenv("WPE_LAZY_IMAGE_ACCOUNTING_TRACE")) == "1"_s;
+            static thread_local unsigned traces;
+            if (trace && traces++ < 32)
+                dataLogLn("WPE lazy image mutation remains nonblocking");
         }
         auto imageLoading = (m_lazyImageLoadState == LazyImageLoadState::Deferred) ? ImageLoading::DeferredUntilVisible : ImageLoading::Immediate;
         newImage = protect(document->cachedResourceLoader())->requestImage(WTF::move(request), imageLoading).value_or(nullptr);

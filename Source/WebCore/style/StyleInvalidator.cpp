@@ -42,6 +42,7 @@
 #include "StyleSheetContents.h"
 #include "TypedElementDescendantIteratorInlines.h"
 #include <ranges>
+#include <wtf/DataLog.h>
 #include <wtf/SetForScope.h>
 
 namespace WebCore {
@@ -49,11 +50,31 @@ namespace Style {
 
 static bool LEGACY_NODELETE shouldDirtyAllStyle(const Vector<Ref<StyleRuleBase>>& rules)
 {
+    static const bool selectiveSupports = [] {
+        if (const char* value = getenv("WPE_SELECTIVE_SUPPORTS_INVALIDATION"))
+            return *value != '0';
+#if PLATFORM(WPE)
+        return true;
+#else
+        return false;
+#endif
+    }();
     for (auto& rule : rules) {
         if (auto* styleRuleMedia = dynamicDowncast<StyleRuleMedia>(rule.get())) {
             if (shouldDirtyAllStyle(styleRuleMedia->childRules()))
                 return true;
             continue;
+        }
+        if (selectiveSupports) {
+            if (auto* supports = dynamicDowncast<StyleRuleSupports>(rule.get())) {
+                if (shouldDirtyAllStyle(supports->childRules()))
+                    return true;
+                static const bool trace = StringView::fromLatin1(getenv("WPE_SELECTIVE_SUPPORTS_INVALIDATION_TRACE")) == "1"_s;
+                static thread_local unsigned traces;
+                if (trace && traces++ < 32)
+                    dataLogLn("WPE supports rules permit selective invalidation");
+                continue;
+            }
         }
         if (auto* styleRuleWithNesting = dynamicDowncast<StyleRuleWithNesting>(rule.get())) {
             if (shouldDirtyAllStyle(styleRuleWithNesting->nestedRules()))

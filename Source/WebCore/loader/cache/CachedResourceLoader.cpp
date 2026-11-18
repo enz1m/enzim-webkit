@@ -96,6 +96,7 @@
 #include "UserContentController.h"
 #include "UserStyleSheet.h"
 #include <pal/SessionID.h>
+#include <wtf/DataLog.h>
 #include <wtf/RuntimeApplicationChecks.h>
 #include <wtf/Scope.h>
 #include <wtf/text/CString.h>
@@ -1406,11 +1407,27 @@ ResourceErrorOr<Ref<CachedResource>> CachedResourceLoader::requestResource(Cache
             resource->setIsHashReportingNeeded();
     }
 
+    static const bool preserveLazyImageExemption = [] {
+        if (const char* value = getenv("WPE_LAZY_IMAGE_ACCOUNTING"))
+            return *value != '0';
+#if PLATFORM(WPE)
+        return true;
+#else
+        return false;
+#endif
+    }();
     if (RefPtr subresourceLoader = resource->loader(); forPreload == ForPreload::No && subresourceLoader && resource->ignoreForRequestCount()) {
-        subresourceLoader->clearRequestCountTracker();
-        resource->setIgnoreForRequestCount(false);
-        subresourceLoader->resetRequestCountTracker(*this, *resource);
-        ignoreForRequestCount = false;
+        if (preserveLazyImageExemption && type == CachedResource::Type::ImageResource && ignoreForRequestCount) {
+            static const bool trace = StringView::fromLatin1(getenv("WPE_LAZY_IMAGE_ACCOUNTING_TRACE")) == "1"_s;
+            static thread_local unsigned traces;
+            if (trace && traces++ < 32)
+                dataLogLn("WPE shared lazy image remains nonblocking");
+        } else {
+            subresourceLoader->clearRequestCountTracker();
+            resource->setIgnoreForRequestCount(false);
+            subresourceLoader->resetRequestCountTracker(*this, *resource);
+            ignoreForRequestCount = false;
+        }
     }
 
     if ((policy != Use || resource->stillNeedsLoad()) && imageLoading == ImageLoading::Immediate) {
