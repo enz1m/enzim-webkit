@@ -110,6 +110,7 @@ static bool LEGACY_NODELETE isInheritedCustomProperty(const CSSRegisteredCustomP
 Builder::Builder(Style::ComputedStyle& style, BuilderContext&& context, const MatchResult& matchResult, PropertyCascade::IncludedProperties&& includedProperties, const HashMap<AnimatableCSSProperty, EnumSet<PropertyCascade::AnimationSource>>* animatedProperties)
     : m_cascade(matchResult, WTF::move(includedProperties), animatedProperties, protect(positionTryFallbackProperties(context)))
     , m_state(BuilderState::create(style, WTF::move(context)))
+    , m_isAnimationBuilder(!!animatedProperties)
 {
 }
 
@@ -222,18 +223,172 @@ inline void Builder::applyPropertiesImpl(CSSPropertyID firstProperty, CSSPropert
     }
 }
 
+// A rule such as `:root, :where(:root *) { --a: 1px; --b: var(--a); ... }` declares the same custom
+// properties on every element. Each element resolves them again, and when the parent has the same
+// values the result is the parent's own data, which setCustomPropertyValue() leaves shared. Resolving
+// unregistered custom properties depends only on their declarations and on the inherited custom
+// properties, so a pair of (declarations, parent data) that gave back the parent's data once gives it
+// back again. Declarations that depend on anything else are not remembered: registered properties
+// (computed against the element), attr(), env(), inherit(), custom functions, revert keywords,
+// animations and custom function evaluation. The sixteen entries keep their declarations and parent
+// data alive, so that a pointer in a key cannot come back as another object.
+namespace {
+
+struct ParentCustomPropertiesEntry {
+    RefPtr<const CustomPropertyData> parentData;
+    unsigned hash { 0 };
+    HashMap<AtomString, const CSSValue*> declarations;
+    Vector<Ref<const CSSValue>> retainedDeclarations;
+};
+
+static bool parentCustomPropertiesCacheEnabled()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("WPE_PARENT_CUSTOM_PROPERTIES_CACHE");
+        return !value || *value != '0';
+    }();
+    return enabled;
+}
+
+static Vector<ParentCustomPropertiesEntry>& parentCustomPropertiesCache()
+{
+    static NeverDestroyed<Vector<ParentCustomPropertiesEntry>> cache;
+    return cache;
+}
+
+static unsigned parentCustomPropertiesHash(const PropertyCascade& cascade, const CustomPropertyData& parentData)
+{
+    // Summed so that the order in which the cascade lists its custom properties does not matter.
+    unsigned hash = PtrHash<const CustomPropertyData*>::hash(&parentData);
+    for (auto& [name, property] : cascade.customProperties())
+        hash += pairIntHash(PtrHash<const StringImpl*>::hash(name.impl()), PtrHash<const CSSValue*>::hash(property.cssValue[SelectorChecker::MatchDefault]));
+    return hash;
+}
+
+static bool tokensSubstituteOnlyCustomProperties(const CSSVariableData& data)
+{
+    for (auto& token : data.tokens()) {
+        if (token.type() == FunctionToken && !equalLettersIgnoringASCIICase(token.value(), "var"_s))
+            return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool Builder::customPropertyCascadeIsReusable() const
+{
+    if (!parentCustomPropertiesCacheEnabled() || !isMainThread() || experimentalCustomPropertyInheritanceEnabled())
+        return false;
+    if (m_isAnimationBuilder || m_state->m_isBuildingKeyframeStyle || m_state->isBuildingHighlightStyle())
+        return false;
+    if (m_state->callingContextBuilder() || m_state->localPropertyRegistry() || !m_state->m_context.parentStyle)
+        return false;
+    if (m_cascade.customProperties().isEmpty())
+        return false;
+
+    for (auto& [name, property] : m_cascade.customProperties()) {
+        if (m_state->registeredProperty(name))
+            return false;
+        RefPtr value = dynamicDowncast<CSSCustomPropertyValue>(property.cssValue[SelectorChecker::MatchDefault]);
+        if (!value)
+            return false;
+        bool reusable = switchOn(value->value(),
+            [](const Ref<CSSSubstitutionValue>& substitution) {
+                return !substitution->containsInheritFunction() && substitution->data().isAttrTainted() == IsAttrTainted::No
+                    && tokensSubstituteOnlyCustomProperties(substitution->data());
+            },
+            [](const Ref<CSSVariableData>& data) {
+                return data->isAttrTainted() == IsAttrTainted::No;
+            },
+            [](CSSWideKeyword keyword) {
+                return keyword == CSSWideKeyword::Inherit || keyword == CSSWideKeyword::Initial || keyword == CSSWideKeyword::Unset;
+            });
+        if (!reusable)
+            return false;
+    }
+    return true;
+}
+
+bool Builder::customPropertiesAreTheParents()
+{
+    if (m_customPropertiesAreTheParents)
+        return *m_customPropertiesAreTheParents;
+    m_customPropertiesAreTheParents = false;
+
+    if (!parentCustomPropertiesCacheEnabled() || !isMainThread() || m_cascade.customProperties().isEmpty() || !m_state->m_context.parentStyle)
+        return false;
+    auto& parentData = m_state->parentStyle().inheritedCustomProperties();
+    if (&m_state->style().inheritedCustomProperties() != &parentData || m_state->style().nonInheritedCustomProperties().size())
+        return false;
+    if (m_isAnimationBuilder || m_state->m_isBuildingKeyframeStyle || m_state->isBuildingHighlightStyle() || m_state->callingContextBuilder() || m_state->localPropertyRegistry())
+        return false;
+
+    unsigned hash = parentCustomPropertiesHash(m_cascade, parentData);
+    for (auto& entry : parentCustomPropertiesCache()) {
+        if (entry.hash != hash || entry.parentData.get() != &parentData || entry.declarations.size() != m_cascade.customProperties().size())
+            continue;
+        bool same = true;
+        for (auto& [name, property] : m_cascade.customProperties()) {
+            auto iterator = entry.declarations.find(name);
+            // A property registered since the entry was made is resolved against the element.
+            if (iterator == entry.declarations.end() || iterator->value != property.cssValue[SelectorChecker::MatchDefault] || m_state->registeredProperty(name)) {
+                same = false;
+                break;
+            }
+        }
+        if (!same)
+            continue;
+        m_customPropertiesAreTheParents = true;
+        break;
+    }
+    return *m_customPropertiesAreTheParents;
+}
+
+void Builder::rememberCustomPropertiesAreTheParents()
+{
+    if (!m_state->m_context.parentStyle)
+        return;
+    auto& parentData = m_state->parentStyle().inheritedCustomProperties();
+    if (&m_state->style().inheritedCustomProperties() != &parentData || m_state->style().nonInheritedCustomProperties().size())
+        return;
+    if (!customPropertyCascadeIsReusable())
+        return;
+
+    ParentCustomPropertiesEntry entry;
+    entry.parentData = &parentData;
+    entry.hash = parentCustomPropertiesHash(m_cascade, parentData);
+    for (auto& [name, property] : m_cascade.customProperties()) {
+        entry.declarations.add(name, property.cssValue[SelectorChecker::MatchDefault]);
+        entry.retainedDeclarations.append(Ref { *property.cssValue[SelectorChecker::MatchDefault] });
+    }
+
+    constexpr size_t capacity = 16;
+    static size_t next;
+    auto& cache = parentCustomPropertiesCache();
+    if (cache.size() < capacity)
+        cache.append(WTF::move(entry));
+    else
+        cache[next++ % capacity] = WTF::move(entry);
+}
+
 void Builder::applyCustomProperties()
 {
+    if (customPropertiesAreTheParents())
+        return;
+    bool remember = !m_state->callingContextBuilder();
     for (auto& [name, value] : m_cascade.customProperties()) {
         if (m_state->m_appliedCustomProperties.contains(name))
             continue;
         applyCustomPropertyImpl(name, value);
     }
+    if (remember)
+        rememberCustomPropertiesAreTheParents();
 }
 
 void Builder::applyCustomProperty(const AtomString& name)
 {
-    if (m_state->m_appliedCustomProperties.contains(name))
+    if (m_state->m_appliedCustomProperties.contains(name) || customPropertiesAreTheParents())
         return;
 
     auto iterator = m_cascade.customProperties().find(name);

@@ -78,6 +78,9 @@ private:
     void applyCustomProperties();
     void applyCustomPropertyImpl(const AtomString&, const PropertyCascade::Property&);
     void applyCustomPropertyFromCallingContext(const AtomString&);
+    bool customPropertiesAreTheParents();
+    bool customPropertyCascadeIsReusable() const;
+    void rememberCustomPropertiesAreTheParents();
 
     enum CustomPropertyCycleTracking { Enabled = 0, Disabled };
     template<CustomPropertyCycleTracking trackCycles>
@@ -103,6 +106,10 @@ private:
     RollbackCascadeKey LEGACY_NODELETE makeRollbackCascadeKeyForRevertRule(const PropertyCascade& parentCascade);
 
     const PropertyCascade m_cascade;
+    // Set on the first custom property applied: whether resolving this cascade's custom properties is
+    // known to give back the parent's data unchanged, so that none needs to be resolved.
+    std::optional<bool> m_customPropertiesAreTheParents;
+    const bool m_isAnimationBuilder;
     // Rollback cascades are build on demand to resolve 'revert' and 'revert-layer' keywords.
     HashMap<RollbackCascadeKey, std::unique_ptr<const PropertyCascade>> m_rollbackCascades;
 
