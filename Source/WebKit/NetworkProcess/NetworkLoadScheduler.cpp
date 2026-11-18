@@ -31,6 +31,7 @@
 #include "Logging.h"
 #include "NetworkLoad.h"
 #include <WebCore/ResourceError.h>
+#include <WebCore/ResourceResponse.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/WeakHashSet.h>
 #include <wtf/WeakListHashSet.h>
@@ -67,6 +68,19 @@ static bool h2LowPriorityBudgetEnabled()
 #endif
 }
 
+static bool criticalWindowEnabled()
+{
+#if PLATFORM(WPE)
+    static const bool enabled = [] {
+        const char* value = getenv("WPE_H2_CRITICAL_WINDOW");
+        return !value || *value != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 class NetworkLoadScheduler::HostContext {
     WTF_MAKE_TZONE_ALLOCATED(NetworkLoadScheduler::HostContext);
 public:
@@ -78,6 +92,7 @@ public:
     void prioritize(NetworkLoad&);
     void appendPendingForURL(const URL&, Vector<Ref<NetworkLoad>>&) const;
     void noteProtocol(const NetworkLoad&, const String&);
+    void noteLargeBody(NetworkLoad& load) { m_largeBodies.add(load); }
     void setParsingComplete(bool value)
     {
         if (m_parsingComplete == value)
@@ -116,6 +131,7 @@ private:
     void drainPending();
 
     WeakHashSet<NetworkLoad> m_activeLoads;
+    WeakHashSet<NetworkLoad> m_largeBodies;
     WeakListHashSet<NetworkLoad> m_pendingLoads;
     HashSet<String> m_http2Origins;
     bool m_mainResourceInFlight { false };
@@ -151,6 +167,7 @@ void NetworkLoadScheduler::HostContext::schedule(NetworkLoad& load)
 void NetworkLoadScheduler::HostContext::unschedule(NetworkLoad& load)
 {
     m_activeLoads.remove(load);
+    m_largeBodies.remove(load);
     m_pendingLoads.remove(load);
 
     drainPending();
@@ -166,9 +183,23 @@ bool NetworkLoadScheduler::HostContext::shouldDelayLowPriority(const NetworkLoad
         return !value || *value != '0';
     }();
     auto limit = expandedWindow ? maximumParsedHTTP2LowPriorityCount : maximumActiveCountForLowPriority;
+    bool guardCritical = criticalWindowEnabled();
     size_t lowPriorityCount = 0;
+    size_t sameOriginActiveCount = 0;
+    bool hasCriticalTransfer = false;
+    auto origin = load.currentRequest().url().protocolHostAndPort();
     for (Ref active : m_activeLoads) {
-        if (active->currentRequest().priority() <= WebCore::ResourceLoadPriority::Low && ++lowPriorityCount >= limit)
+        const auto& request = active->currentRequest();
+        if (guardCritical && active->currentRequest().url().protocolHostAndPort() == origin) {
+            ++sameOriginActiveCount;
+            hasCriticalTransfer |= m_largeBodies.contains(active) && request.priority() >= WebCore::ResourceLoadPriority::High
+                && request.requester() == WebCore::ResourceRequestRequester::Unspecified;
+            if (hasCriticalTransfer && sameOriginActiveCount >= maximumActiveCountForLowPriority)
+                return true;
+        }
+        if (request.priority() <= WebCore::ResourceLoadPriority::Low)
+            ++lowPriorityCount;
+        if (lowPriorityCount >= limit)
             return true;
     }
     static unsigned traceBudget = 32;
@@ -278,6 +309,15 @@ void NetworkLoadScheduler::cachedResourceBecameAvailable(const URL& url)
             dataLogLn("WPE pending cache reader wakes after store");
         }
     }
+}
+
+void NetworkLoadScheduler::didReceiveResponse(NetworkLoad& load, const WebCore::ResourceResponse& response)
+{
+    if (!criticalWindowEnabled() || !load.parameters().webPageID || response.expectedContentLength() < 128 * 1024
+        || load.currentRequest().requester() != WebCore::ResourceRequestRequester::Unspecified)
+        return;
+    if (auto* context = contextForLoad(load))
+        context->noteLargeBody(load);
 }
 
 void NetworkLoadScheduler::schedule(NetworkLoad& load)

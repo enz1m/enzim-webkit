@@ -518,6 +518,8 @@ void NetworkLoad::notifyDidReceiveResponse(ResourceResponse&& response, Negotiat
         response.includeCertificateInfo(auditToken);
     }
 
+    if (RefPtr scheduler = m_scheduler.get())
+        scheduler->didReceiveResponse(*this, response);
     client->didReceiveResponse(WTF::move(response), privateRelayed, WTF::move(completionHandler));
 }
 

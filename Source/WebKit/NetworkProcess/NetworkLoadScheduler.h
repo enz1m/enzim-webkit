@@ -38,6 +38,7 @@
 
 namespace WebCore {
 class ResourceError;
+class ResourceResponse;
 }
 
 namespace WebKit {
@@ -55,6 +56,7 @@ public:
     ~NetworkLoadScheduler();
 
     void schedule(NetworkLoad&);
+    void didReceiveResponse(NetworkLoad&, const WebCore::ResourceResponse&);
     void unschedule(NetworkLoad&, const WebCore::NetworkLoadMetrics* = nullptr);
 
     void startedPreconnectForMainResource(const URL&, const String& userAgent);
