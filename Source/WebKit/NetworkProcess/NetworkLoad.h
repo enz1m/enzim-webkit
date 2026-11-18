@@ -64,6 +64,7 @@ public:
 
     void start();
     void startWithScheduling();
+    bool tryUseCachedResponse();
     void cancel();
 
     bool isAllowedToAskUserForCredentials() const;

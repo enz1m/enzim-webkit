@@ -64,6 +64,10 @@ struct _WebKitSettingsPrivate {
     _WebKitSettingsPrivate()
         : preferences(WebPreferences::create(String(), "WebKit2."_s, "WebKit2."_s))
     {
+#if PLATFORM(WPE)
+        if (const char* idleCallbacks = getenv("WPE_IDLE_CALLBACK"); idleCallbacks && *idleCallbacks == '1')
+            preferences->setRequestIdleCallbackEnabled(true);
+#endif
         defaultFontFamily = preferences->standardFontFamily().utf8();
         monospaceFontFamily = preferences->fixedFontFamily().utf8();
         serifFontFamily = preferences->serifFontFamily().utf8();

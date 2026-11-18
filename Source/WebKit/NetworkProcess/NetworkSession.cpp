@@ -279,6 +279,15 @@ NetworkSession::NetworkSession(NetworkProcess& networkProcess, const NetworkSess
 {
     setIPAddressSpaceOverridesForTesting(parameters.ipAddressSpaceOverridesForTesting);
 
+#if PLATFORM(WPE)
+    static const bool memoryHTTPCacheEnabled = [] {
+        const char* value = getenv("WPE_MEMORY_HTTP_CACHE");
+        return !value || *value != '0';
+    }();
+    if (m_sessionID.isEphemeral() && memoryHTTPCacheEnabled)
+        m_cache = NetworkCache::Cache::open(networkProcess, emptyString(), { }, m_sessionID);
+#endif
+
     if (!m_sessionID.isEphemeral()) {
         String networkCacheDirectory = parameters.networkCacheDirectory;
         if (!networkCacheDirectory.isNull()) {
@@ -416,7 +425,8 @@ void NetworkSession::invalidateAndCancel()
     if (m_cache) {
         auto networkCacheDirectory = m_cache->storageDirectory();
         m_cache = nullptr;
-        FileSystem::markPurgeable(networkCacheDirectory);
+        if (!networkCacheDirectory.isEmpty())
+            FileSystem::markPurgeable(networkCacheDirectory);
     }
 
     if (auto server = std::exchange(m_swServer, { }))
@@ -991,6 +1001,8 @@ void NetworkSession::reportNetworkIssue(WebPageProxyIdentifier pageIdentifier, c
 void NetworkSession::lowMemoryHandler(Critical)
 {
     clearPrefetchCache();
+    if (m_sessionID.isEphemeral() && m_cache)
+        m_cache->clear();
 
     if (RefPtr swServer = m_swServer)
         swServer->handleLowMemoryWarning();

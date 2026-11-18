@@ -8640,8 +8640,23 @@ void Document::finishedParsing()
     ASSERT(!scriptableDocumentParser() || !m_parser->isParsing());
     ASSERT(!scriptableDocumentParser() || m_readyState != ReadyState::Loading);
     setParsing(false);
-
     Ref protectedThis { *this };
+#if PLATFORM(WPE)
+    static const bool wakeNetworkScheduling = [] {
+        const char* value = getenv("WPE_PARSE_FINISH_NETWORK_WAKE");
+        return !value || *value != '0';
+    }();
+    if (wakeNetworkScheduling && frame() && frame()->isMainFrame()) {
+        if (RefPtr documentLoader = loader(); documentLoader && documentLoader->response().httpVersion() == "HTTP/2"_s) {
+            scheduleRenderingUpdate({ });
+            static unsigned traceBudget = 16;
+            if (getenv("WPE_PARSE_FINISH_NETWORK_WAKE_TRACE") && traceBudget) {
+                --traceBudget;
+                dataLogLn("WPE parsing completion schedules network prioritization");
+            }
+        }
+    }
+#endif
 
     // Covers documents that never called processViewport at all, which have therefore not opted in.
     // Runs before deferred scripts and DOMContentLoaded so script does not observe the change.

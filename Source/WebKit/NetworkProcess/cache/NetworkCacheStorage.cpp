@@ -338,6 +338,11 @@ static String makeSaltFilePath(const String& baseDirectoryPath)
 RefPtr<Storage> Storage::open(const String& baseCachePath, Mode mode, size_t capacity, size_t mainResourceBlobMemoryCacheFileLimit)
 {
     ASSERT(RunLoop::isMain());
+    if (mode == Mode::Memory) {
+        Salt salt;
+        cryptographicallyRandomValues(salt);
+        return adoptRef(new Storage(emptyString(), mode, salt, capacity, 0));
+    }
     ASSERT(!baseCachePath.isNull());
 
     auto cachePath = makeCachePath(baseCachePath);
@@ -438,8 +443,10 @@ Storage::Storage(const String& baseDirectoryPath, Mode mode, Salt salt, size_t c
 {
     ASSERT(RunLoop::isMain());
 
-    deleteOldVersions();
-    synchronize();
+    if (m_mode != Mode::Memory) {
+        deleteOldVersions();
+        synchronize();
+    }
 }
 
 Storage::~Storage()
@@ -572,6 +579,8 @@ void Storage::addToRecordFilter(const Key& key)
 bool Storage::mayContain(const Key& key) const
 {
     ASSERT(RunLoop::isMain());
+    if (m_mode == Mode::Memory)
+        return m_memoryRecords.contains(key);
     return !m_recordFilter || m_recordFilter->mayContain(key.hash());
 }
 
@@ -822,9 +831,23 @@ void Storage::removeFromPendingWriteOperations(const Key& key)
     }
 }
 
+static size_t memoryRecordSize(const Storage::Record& record)
+{
+    // Charge metadata and key strings as well as response bytes to bound tiny-entry floods.
+    return record.header.size() + record.body.size() + 1024
+        + 2 * (record.key.identifier().length() + record.key.partition().length() + record.key.range().length() + record.key.type().length());
+}
+
 void Storage::remove(const Key& key)
 {
     ASSERT(RunLoop::isMain());
+    if (m_mode == Mode::Memory) {
+        if (auto it = m_memoryRecords.find(key); it != m_memoryRecords.end()) {
+            m_approximateRecordsSize -= memoryRecordSize(it->value->record);
+            m_memoryRecords.remove(it);
+        }
+        return;
+    }
 
     if (!mayContain(key))
         return;
@@ -845,6 +868,13 @@ void Storage::remove(const Key& key)
 void Storage::remove(const Vector<Key>& keys, CompletionHandler<void()>&& completionHandler)
 {
     ASSERT(RunLoop::isMain());
+    if (m_mode == Mode::Memory) {
+        for (auto& key : keys)
+            remove(key);
+        if (completionHandler)
+            completionHandler();
+        return;
+    }
 
     auto keysToRemove = WTF::compactMap(keys, [&](auto& key) -> std::optional<Key> {
         if (!mayContain(key))
@@ -1095,6 +1125,19 @@ void Storage::retrieve(const Key& key, unsigned priority, RetrieveCompletionHand
     ASSERT(RunLoop::isMain());
     ASSERT(!key.isNull());
 
+    if (m_mode == Mode::Memory) {
+        auto it = m_memoryRecords.find(key);
+        if (it == m_memoryRecords.end()) {
+            completionHandler({ }, { });
+            return;
+        }
+        it->value->lastAccessTime = WallTime::now();
+        auto record = it->value->record.isolatedCopy();
+        if (!completionHandler(WTF::move(record), { }))
+            remove(key);
+        return;
+    }
+
     if (!m_capacity) {
         completionHandler({ }, { });
         return;
@@ -1123,6 +1166,18 @@ void Storage::store(const Record& record, MappedBodyHandler&& mappedBodyHandler,
     ASSERT(RunLoop::isMain());
     ASSERT(!record.key.isNull());
 
+    if (m_mode == Mode::Memory) {
+        remove(record.key);
+        auto size = memoryRecordSize(record);
+        if (size <= std::min(m_capacity, static_cast<size_t>(2 * MB))) {
+            m_memoryRecords.set(record.key, std::make_unique<MemoryRecord>(MemoryRecord { record.isolatedCopy(), WallTime::now() }));
+            m_approximateRecordsSize += size;
+            shrinkIfNeeded();
+        }
+        if (mappedBodyHandler)
+            mappedBodyHandler({ });
+        return;
+    }
     if (!m_capacity)
         return;
 
@@ -1143,6 +1198,25 @@ void Storage::traverseInternal(const String& partitionName, const String& type, 
 {
     ASSERT(RunLoop::isMain());
     ASSERT(traverseHandler);
+
+    if (m_mode == Mode::Memory) {
+        Vector<MemoryRecord> records;
+        for (auto& entry : m_memoryRecords) {
+            if (!type.isEmpty() && entry.key.type() != type)
+                continue;
+            if (!partitionName.isEmpty() && Key::partitionToPartitionHashAsString(entry.key.partition(), m_salt) != partitionName)
+                continue;
+            records.append(MemoryRecord { entry.value->record.isolatedCopy(), entry.value->lastAccessTime });
+        }
+        RunLoop::mainSingleton().dispatch([records = WTF::move(records), handler = WTF::move(traverseHandler)]() mutable {
+            for (auto& entry : records) {
+                RecordInfo info { entry.record.body.size(), 1, 1, { }, entry.lastAccessTime };
+                handler(&entry.record, info);
+            }
+            handler(nullptr, { });
+        });
+        return;
+    }
 
     auto traverseOperation = TraverseOperation::create(WTF::move(traverseHandler));
     ioQueue().dispatch([this, protectedThis = Ref { *this }, traverseOperation = WTF::move(traverseOperation), flags, partitionName = crossThreadCopy(partitionName), type = crossThreadCopy(type)]() mutable {
@@ -1266,6 +1340,15 @@ void Storage::clear(String&& type, WallTime modifiedSinceTime, CompletionHandler
 {
     ASSERT(RunLoop::isMain());
     LOG(NetworkCacheStorage, "(NetworkProcess) clearing cache");
+    if (m_mode == Mode::Memory) {
+        Vector<Key> keys;
+        for (auto& entry : m_memoryRecords) {
+            if ((type.isEmpty() || entry.key.type() == type) && entry.value->record.timeStamp >= modifiedSinceTime)
+                keys.append(entry.key);
+        }
+        remove(keys, WTF::move(completionHandler));
+        return;
+    }
 
     if (m_recordFilter)
         m_recordFilter->clear();
@@ -1330,6 +1413,18 @@ static double deletionProbability(FileTimes times, unsigned bodyShareCount)
 void Storage::shrinkIfNeeded()
 {
     ASSERT(RunLoop::isMain());
+
+    if (m_mode == Mode::Memory) {
+        while (m_approximateRecordsSize > m_capacity || m_memoryRecords.size() > 1024) {
+            auto oldest = m_memoryRecords.begin();
+            for (auto it = m_memoryRecords.begin(); it != m_memoryRecords.end(); ++it) {
+                if (it->value->lastAccessTime < oldest->value->lastAccessTime)
+                    oldest = it;
+            }
+            remove(oldest->key);
+        }
+        return;
+    }
 
     // Avoid randomness caused by cache shrinks.
     if (m_mode == Mode::AvoidRandomness)

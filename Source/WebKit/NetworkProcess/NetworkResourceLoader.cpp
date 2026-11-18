@@ -26,6 +26,9 @@
 
 #include "config.h"
 #include "NetworkResourceLoader.h"
+#include <memory>
+#include <wtf/DataLog.h>
+#include <wtf/RunLoop.h>
 
 #include "ArgumentCoders.h"
 #include "FormDataReference.h"
@@ -230,7 +233,7 @@ bool NetworkResourceLoader::canUseCache(const ResourceRequest& request) const
 {
     if (!m_cache)
         return false;
-    ASSERT(!sessionID().isEphemeral());
+    ASSERT(!sessionID().isEphemeral() || m_cache->storageDirectory().isEmpty());
 
     if (!request.url().protocolIsInHTTPFamily())
         return false;
@@ -436,6 +439,54 @@ bool NetworkResourceLoader::isLocalFileLoadAllowed(const URL& url)
     return pathIsAllowed;
 }
 #endif // ENABLE(BLOCKING_OF_LOCAL_FILE_LOADS_WITHOUT_SANDBOX_EXTENSION)
+
+bool NetworkResourceLoader::shouldStartNetworkLoad()
+{
+#if PLATFORM(WPE)
+    static const bool recheckImageCache = [] {
+        const char* value = getenv("WPE_QUEUED_IMAGE_CACHE_RECHECK");
+        return !value || *value != '0';
+    }();
+    if (!recheckImageCache || !sessionID().isEphemeral() || !m_cache || !m_networkLoad || isSynchronous()
+        || m_parameters.options.destination != FetchOptions::Destination::Image)
+        return true;
+    auto request = m_networkLoad->currentRequest();
+    if (!canUseCache(request) || request.httpMethod() != "GET"_s || request.isConditional()
+        || request.cachePolicy() != ResourceRequestCachePolicy::UseProtocolCachePolicy)
+        return true;
+
+    struct RecheckResult {
+        bool completed { false };
+        std::unique_ptr<NetworkCache::Entry> entry;
+    };
+    auto result = std::make_shared<RecheckResult>();
+    m_cache->retrieve(request, globalFrameID(), m_parameters.isNavigatingToAppBoundDomain, m_parameters.allowPrivacyProxy, m_parameters.advancedPrivacyProtections, [result](auto entry, auto) {
+        result->entry = WTF::move(entry);
+        result->completed = true;
+    });
+    // Private memory storage completes synchronously; an asynchronous backend keeps the network path.
+    if (!result->completed || !result->entry || result->entry->needsValidation() || result->entry->redirectRequest())
+        return true;
+
+    RunLoop::mainSingleton().dispatch([weakThis = WeakPtr { *this }, load = Ref { *m_networkLoad }, entry = WTF::move(result->entry), request = WTF::move(request)]() mutable {
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis || protectedThis->m_networkLoad.get() != load.ptr())
+            return;
+        load->clearClient();
+        load->cancel();
+        protectedThis->m_networkLoad = nullptr;
+        protectedThis->retrieveCacheEntryInternal(WTF::move(entry), WTF::move(request));
+    });
+    static unsigned traceBudget = 16;
+    if (getenv("WPE_QUEUED_IMAGE_CACHE_RECHECK_TRACE") && traceBudget) {
+        --traceBudget;
+        dataLogLn("WPE queued image uses a completed memory cache entry");
+    }
+    return false;
+#else
+    return true;
+#endif
+}
 
 void NetworkResourceLoader::startNetworkLoad(ResourceRequest&& request, FirstLoad load)
 {

@@ -36,6 +36,7 @@
 #include "LocalFrameView.h"
 #include "ScriptController.h"
 #include "ScriptElement.h"
+#include "ScriptRunner.h"
 #include "Settings.h"
 #include <cstdlib>
 #include <wtf/DataLog.h>
@@ -47,15 +48,20 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(HTMLParserScheduler);
 
-static Seconds LEGACY_NODELETE parserTimeLimit(Page* page)
+static Seconds LEGACY_NODELETE parserTimeLimit(Document* document)
 {
-    // Always yield after exceeding this.
-    constexpr auto defaultParserTimeLimit = 500_ms;
-
-    // We're using the poorly named customHTMLTokenizerTimeDelay setting.
+    Page* page = document ? document->page() : nullptr;
     if (page && page->hasCustomHTMLTokenizerTimeDelay())
         return Seconds(page->customHTMLTokenizerTimeDelay());
-    return defaultParserTimeLimit;
+#if PLATFORM(WPE)
+    static const bool yieldDuringBootstrap = StringView::fromLatin1(std::getenv("WPE_HTML_PARSER_YIELD")) == "1"_s;
+    if (yieldDuringBootstrap && document) {
+        auto* runner = document->scriptRunnerIfExists();
+        if (!(document->view() && document->view()->hasEverPainted()) || (runner && runner->hasPendingScripts()))
+            return 16_ms;
+    }
+#endif
+    return 500_ms;
 }
 
 ActiveParserSession::ActiveParserSession(Document* document)
@@ -88,7 +94,7 @@ Ref<HTMLParserScheduler> HTMLParserScheduler::create(HTMLDocumentParser& parser)
 
 HTMLParserScheduler::HTMLParserScheduler(HTMLDocumentParser& parser)
     : m_parser(&parser)
-    , m_parserTimeLimit(parserTimeLimit(parser.document()->page()))
+    , m_parserTimeLimit(parserTimeLimit(parser.document()))
     , m_continueNextChunkTimer(*this, &HTMLParserScheduler::continueNextChunkTimerFired)
     , m_isSuspendedWithActiveTimer(false)
 #if ASSERT_ENABLED
@@ -121,6 +127,7 @@ void HTMLParserScheduler::continueNextChunkTimerFired()
         m_continueNextChunkTimer.startOneShot(0_s);
         return;
     }
+    m_parserTimeLimit = parserTimeLimit(m_parser->document());
     Ref { *m_parser }->resumeParsingAfterYield();
 }
 

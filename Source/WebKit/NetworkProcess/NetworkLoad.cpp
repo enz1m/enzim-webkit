@@ -289,8 +289,16 @@ void NetworkLoad::start()
         return;
 #endif // ENABLE(INSPECTOR_NETWORK_THROTTLING)
 
+    Ref protectedThis { *this };
+    if (m_client && !m_client->shouldStartNetworkLoad())
+        return;
     if (RefPtr task = m_task)
         task->resume();
+}
+
+bool NetworkLoad::tryUseCachedResponse()
+{
+    return m_client && !m_client->shouldStartNetworkLoad();
 }
 
 void NetworkLoad::startWithScheduling()

@@ -51,6 +51,7 @@ public:
     virtual ~NetworkLoadClient() { }
 
     virtual bool isSynchronous() const = 0;
+    virtual bool shouldStartNetworkLoad() { return true; }
 
     virtual bool isAllowedToAskUserForCredentials() const = 0;
 

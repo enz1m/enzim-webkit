@@ -50,7 +50,7 @@ class IOChannel;
 class Storage : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Storage, WTF::DestructionThread::MainRunLoop> {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(Storage);
 public:
-    enum class Mode { Normal, AvoidRandomness };
+    enum class Mode { Normal, AvoidRandomness, Memory };
     static RefPtr<Storage> open(const String& cachePath, Mode, size_t capacity, size_t mainResourceBlobMemoryCacheFileLimit);
 
     enum class ReadOperationIdentifierType { };
@@ -205,6 +205,11 @@ private:
 
     size_t m_capacity { std::numeric_limits<size_t>::max() };
     size_t m_approximateRecordsSize { 0 };
+    struct MemoryRecord {
+        Record record;
+        WallTime lastAccessTime;
+    };
+    HashMap<Key, std::unique_ptr<MemoryRecord>> m_memoryRecords;
     mutable std::optional<uint32_t> m_volumeBlockSize;
 
     // 2^18 bit filter can support up to 26000 entries with false positive rate < 1%.

@@ -62,6 +62,7 @@ public:
 
     void setResourceLoadSchedulingMode(WebCore::PageIdentifier, WebCore::LoadSchedulingMode);
     void prioritizeLoads(const Vector<Ref<NetworkLoad>>&);
+    void cachedResourceBecameAvailable(const URL&);
     void clearPageData(WebCore::PageIdentifier);
 
 private:

@@ -149,6 +149,7 @@ public:
     struct SynchronousLoadData;
 
     // NetworkLoadClient.
+    bool shouldStartNetworkLoad() final;
     void didSendData(uint64_t bytesSent, uint64_t totalBytesToBeSent) final;
     bool isSynchronous() const final;
     bool isAllowedToAskUserForCredentials() const final { return m_isAllowedToAskUserForCredentials; }

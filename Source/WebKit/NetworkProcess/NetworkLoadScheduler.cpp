@@ -25,6 +25,8 @@
 
 #include "config.h"
 #include "NetworkLoadScheduler.h"
+#include <wtf/RunLoop.h>
+#include <wtf/DataLog.h>
 
 #include "Logging.h"
 #include "NetworkLoad.h"
@@ -38,6 +40,19 @@ namespace WebKit {
 static constexpr size_t maximumActiveCountForLowPriority = 2;
 static constexpr size_t maximumTrackedHTTP1XOrigins = 128;
 
+static bool pendingCacheWakeEnabled()
+{
+#if PLATFORM(WPE)
+    static const bool enabled = [] {
+        const char* value = getenv("WPE_PENDING_IMAGE_CACHE_WAKE");
+        return !value || *value != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 class NetworkLoadScheduler::HostContext {
     WTF_MAKE_TZONE_ALLOCATED(NetworkLoadScheduler::HostContext);
 public:
@@ -47,9 +62,11 @@ public:
     void schedule(NetworkLoad&);
     void unschedule(NetworkLoad&);
     void prioritize(NetworkLoad&);
+    void appendPendingForURL(const URL&, Vector<Ref<NetworkLoad>>&) const;
+    void removePending(NetworkLoad& load) { m_pendingLoads.remove(load); }
 
 private:
-    void start(NetworkLoad&);
+    void start(NetworkLoad&, bool deferUntilNextTurn = false);
     bool shouldDelayLowPriority() const { return m_activeLoads.computeSize() >= maximumActiveCountForLowPriority; }
 
     WeakHashSet<NetworkLoad> m_activeLoads;
@@ -91,7 +108,7 @@ void NetworkLoadScheduler::HostContext::unschedule(NetworkLoad& load)
         return;
 
     if (RefPtr firstPendingLoad = m_pendingLoads.tryTakeFirst())
-        start(*firstPendingLoad);
+        start(*firstPendingLoad, pendingCacheWakeEnabled());
 }
 
 void NetworkLoadScheduler::HostContext::prioritize(NetworkLoad& load)
@@ -105,11 +122,26 @@ void NetworkLoadScheduler::HostContext::prioritize(NetworkLoad& load)
     start(load);
 }
 
-void NetworkLoadScheduler::HostContext::start(NetworkLoad& load)
+void NetworkLoadScheduler::HostContext::start(NetworkLoad& load, bool deferUntilNextTurn)
 {
     m_activeLoads.add(load);
-
+    if (deferUntilNextTurn) {
+        // The finishing client stores its response after releasing the network slot.
+        RunLoop::mainSingleton().dispatch([weakLoad = WeakPtr { load }] {
+            if (RefPtr load = weakLoad.get())
+                load->start();
+        });
+        return;
+    }
     load.start();
+}
+
+void NetworkLoadScheduler::HostContext::appendPendingForURL(const URL& url, Vector<Ref<NetworkLoad>>& result) const
+{
+    for (Ref load : m_pendingLoads) {
+        if (equalIgnoringFragmentIdentifier(load->currentRequest().url(), url))
+            result.append(load.copyRef());
+    }
 }
 
 NetworkLoadScheduler::HostContext::~HostContext()
@@ -122,6 +154,29 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(NetworkLoadScheduler);
 
 NetworkLoadScheduler::NetworkLoadScheduler() = default;
 NetworkLoadScheduler::~NetworkLoadScheduler() = default;
+
+void NetworkLoadScheduler::cachedResourceBecameAvailable(const URL& url)
+{
+    if (!pendingCacheWakeEnabled())
+        return;
+    Vector<Ref<NetworkLoad>> pending;
+    auto host = url.host().toString();
+    for (auto& page : m_pageContexts) {
+        if (auto* context = page.value->get(host))
+            context->appendPendingForURL(url, pending);
+    }
+    for (Ref load : pending) {
+        if (!load->tryUseCachedResponse())
+            continue;
+        if (auto* context = contextForLoad(load))
+            context->removePending(load);
+        static unsigned traceBudget = 16;
+        if (getenv("WPE_PENDING_IMAGE_CACHE_WAKE_TRACE") && traceBudget) {
+            --traceBudget;
+            dataLogLn("WPE pending cache reader wakes after store");
+        }
+    }
+}
 
 void NetworkLoadScheduler::schedule(NetworkLoad& load)
 {

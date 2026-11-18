@@ -33,6 +33,7 @@
 #include "NetworkCacheStorage.h"
 #include "NetworkCacheValidation.h"
 #include "NetworkProcess.h"
+#include "NetworkLoadScheduler.h"
 #include "NetworkSession.h"
 #include "NetworkStorageSession.h"
 #include "WebsiteDataType.h"
@@ -45,6 +46,7 @@
 #include <WebCore/ResourceRequest.h>
 #include <WebCore/ResourceResponse.h>
 #include <WebCore/SharedBuffer.h>
+#include <WebCore/SecurityOriginData.h>
 #include <WebCore/ThermalMitigationNotifier.h>
 #include <WebCore/URLPattern.h>
 #include <WebCore/URLPatternOptions.h>
@@ -96,6 +98,10 @@ static size_t computeCapacity(CacheModel cacheModel, const String& cachePath)
 
 RefPtr<Cache> Cache::open(NetworkProcess& networkProcess, const String& cachePath, OptionSet<CacheOption> options, PAL::SessionID sessionID)
 {
+    if (sessionID.isEphemeral()) {
+        auto storage = Storage::open(emptyString(), Storage::Mode::Memory, 32 * MB, 0);
+        return adoptRef(*new Cache(networkProcess, emptyString(), storage.releaseNonNull(), { }, sessionID));
+    }
     if (!FileSystem::makeAllDirectories(cachePath))
         return nullptr;
 
@@ -171,8 +177,17 @@ size_t Cache::capacity() const
 
 void Cache::updateCapacity()
 {
+    if (m_sessionID.isEphemeral())
+        return;
     auto newCapacity = computeCapacity(m_networkProcess->cacheModel(), m_storage->basePathIsolatedCopy());
     m_storage->setCapacity(newCapacity);
+}
+
+static String cachePartitionForRequest(const WebCore::ResourceRequest& request, PAL::SessionID sessionID)
+{
+    if (!sessionID.isEphemeral())
+        return request.cachePartition();
+    return makeString(WebCore::SecurityOriginData::fromURL(request.firstPartyForCookies()).toString(), '\n', request.cachePartition());
 }
 
 Key Cache::makeCacheKey(RecordType recordType, const WebCore::ResourceRequest& request)
@@ -180,7 +195,7 @@ Key Cache::makeCacheKey(RecordType recordType, const WebCore::ResourceRequest& r
     // FIXME: This implements minimal Range header disk cache support. We don't parse
     // ranges so only the same exact range request will be served from the cache.
     String range = request.httpHeaderField(WebCore::HTTPHeaderName::Range);
-    return { request.cachePartition(), recordTypeName(recordType), range, request.url().stringWithoutFragmentIdentifier(), m_storage->salt() };
+    return { cachePartitionForRequest(request, m_sessionID), recordTypeName(recordType), range, request.url().stringWithoutFragmentIdentifier(), m_storage->salt() };
 }
 
 static bool LEGACY_NODELETE cachePolicyAllowsExpired(WebCore::ResourceRequestCachePolicy policy)
@@ -430,6 +445,12 @@ void Cache::browsingContextRemoved(WebPageProxyIdentifier webPageProxyID, WebCor
 void Cache::retrieve(const WebCore::ResourceRequest& request, std::optional<GlobalFrameID> frameID, std::optional<NavigatingToAppBoundDomain> isNavigatingToAppBoundDomain, bool allowPrivacyProxy, OptionSet<WebCore::AdvancedPrivacyProtections> advancedPrivacyProtections, RetrieveCompletionHandler&& completionHandler)
 {
     ASSERT(request.url().protocolIsInHTTPFamily());
+    if (m_sessionID.isEphemeral() && !request.firstPartyForCookies().protocolIsInHTTPFamily()) {
+        RetrieveInfo info;
+        info.startTime = MonotonicTime::now();
+        completeRetrieve(WTF::move(completionHandler), nullptr, info);
+        return;
+    }
 
     LOG(NetworkCache, "(NetworkProcess) retrieving %s priority %d", request.url().stringWithoutFragmentIdentifier().utf8(), static_cast<int>(request.priority()));
 
@@ -554,6 +575,8 @@ std::unique_ptr<Entry> Cache::makeRedirectEntry(const WebCore::ResourceRequest& 
 std::unique_ptr<Entry> Cache::store(const WebCore::ResourceRequest& request, const WebCore::ResourceResponse& response, PrivateRelayed privateRelayed, RefPtr<WebCore::FragmentedSharedBuffer>&& responseData, Function<void(MappedBody&&)>&& completionHandler)
 {
     ASSERT(responseData);
+    if (m_sessionID.isEphemeral() && !request.firstPartyForCookies().protocolIsInHTTPFamily())
+        return nullptr;
 
     LOG_WITH_STREAM(NetworkCache, stream << "(NetworkProcess) storing "_s << request.url().stringWithoutFragmentIdentifier() << ", partition "_s << (makeCacheKey(RecordType::Resource, request).partition()));
 
@@ -593,12 +616,21 @@ std::unique_ptr<Entry> Cache::store(const WebCore::ResourceRequest& request, con
             completionHandler(WTF::move(mappedBody));
         LOG(NetworkCache, "(NetworkProcess) stored");
     }, storeBlobInMemoryCache);
+#if PLATFORM(WPE)
+    if (m_sessionID.isEphemeral()) {
+        if (CheckedPtr session = m_networkProcess->networkSession(m_sessionID))
+            session->networkLoadScheduler().cachedResourceBecameAvailable(request.url());
+    }
+#endif
 
     return cacheEntry;
 }
 
 std::unique_ptr<Entry> Cache::storeRedirect(const WebCore::ResourceRequest& request, const WebCore::ResourceResponse& response, const WebCore::ResourceRequest& redirectRequest, std::optional<Seconds> maxAgeCap)
 {
+    if (m_sessionID.isEphemeral() && !request.firstPartyForCookies().protocolIsInHTTPFamily())
+        return nullptr;
+
     LOG_WITH_STREAM(NetworkCache, stream << "(NetworkProcess) storing redirect "_s << request.url().string() << " -> "_s << redirectRequest.url().string());
 
     StoreDecision storeDecision = makeStoreDecision(request, response, 0);
@@ -623,6 +655,9 @@ std::unique_ptr<Entry> Cache::storeRedirect(const WebCore::ResourceRequest& requ
 
 void Cache::storeCompressionDictionary(const WebCore::ResourceRequest& request, const WebCore::ResourceResponse& response, RefPtr<WebCore::FragmentedSharedBuffer>&& responseData, CompressionDictionaryEntry::Info&& info)
 {
+    if (m_sessionID.isEphemeral() && !request.firstPartyForCookies().protocolIsInHTTPFamily())
+        return;
+
     ASSERT(responseData);
 
     auto key = makeCacheKey(RecordType::CompressionDictionary, request);
@@ -741,10 +776,13 @@ void Cache::populateCompressionDictionaryIndex()
 // https://fetch.spec.whatwg.org/#find-the-best-matching-dictionary
 std::optional<Cache::CompressionDictionaryMatch> Cache::bestCompressionDictionaryMatch(const WebCore::ResourceRequest& request, WebCore::FetchOptions::Destination destination)
 {
+    if (m_sessionID.isEphemeral() && !request.firstPartyForCookies().protocolIsInHTTPFamily())
+        return std::nullopt;
+
     if (m_compressionDictionaryIndex.isEmpty())
         return std::nullopt;
 
-    auto it = m_compressionDictionaryIndex.find(request.cachePartition());
+    auto it = m_compressionDictionaryIndex.find(cachePartitionForRequest(request, m_sessionID));
     if (it == m_compressionDictionaryIndex.end())
         return std::nullopt;
 
@@ -936,6 +974,8 @@ String Cache::dumpFilePath() const
 
 void Cache::dumpContentsToFile()
 {
+    if (m_sessionID.isEphemeral())
+        return;
     auto fileHandle = openFile(dumpFilePath(), FileOpenMode::Truncate);
     if (!fileHandle)
         return;
@@ -992,6 +1032,8 @@ void Cache::dumpContentsToFile()
 
 void Cache::deleteDumpFile()
 {
+    if (m_sessionID.isEphemeral())
+        return;
     WorkQueue::create("com.apple.WebKit.Cache.delete"_s)->dispatch([path = dumpFilePath().isolatedCopy()] {
         deleteFile(path);
     });

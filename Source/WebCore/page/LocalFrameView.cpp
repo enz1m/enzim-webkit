@@ -122,6 +122,7 @@
 #include "SVGSVGElement.h"
 #include "ScriptDisallowedScope.h"
 #include "ScriptRunner.h"
+#include <wtf/DataLog.h>
 #include "ScriptedAnimationController.h"
 #include "ScrollAnchoringController.h"
 #include "ScrollAnimator.h"
@@ -5943,8 +5944,32 @@ void LocalFrameView::didPaintContents(GraphicsContext& context, const IntRect& d
     if (paintingState.isFlatteningPaintOfRootFrame)
         notifyWidgetsInAllFrames(WidgetNotification::DidPaintFlattened);
 
+#if PLATFORM(WPE)
+    bool isSnapshotting = m_paintBehavior.contains(PaintBehavior::Snapshotting);
+#endif
     m_paintBehavior = paintingState.paintBehavior;
     m_lastPaintTime = MonotonicTime::now();
+
+#if PLATFORM(WPE)
+    static const bool wakeAsyncScripts = [] {
+        const char* value = getenv("WPE_ASYNC_PAINT_WAKE");
+        return !value || *value != '0';
+    }();
+    if (wakeAsyncScripts && !context.paintingDisabled() && !isSnapshotting) {
+        RefPtr document = m_frame->document();
+        if (document && document->parsing() && !document->activeDOMObjectsAreSuspended()) {
+            if (RefPtr runner = document->scriptRunnerIfExists(); runner && runner->hasPendingScripts()) {
+                // A script parked before the first paint otherwise waits for parsing to finish.
+                runner->resume();
+                static unsigned traceBudget = 8;
+                if (getenv("WPE_ASYNC_PAINT_WAKE_TRACE") && traceBudget) {
+                    --traceBudget;
+                    dataLogLn("WPE paint resumes pending async scripts");
+                }
+            }
+        }
+    }
+#endif
 
     if (paintingState.isTopLevelPainter)
         sCurrentPaintTimeStamp = MonotonicTime();
