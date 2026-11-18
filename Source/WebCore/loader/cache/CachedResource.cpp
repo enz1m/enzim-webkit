@@ -29,6 +29,7 @@
 #include "CachedResourceClientWalker.h"
 #include "CachedResourceHandle.h"
 #include "CachedResourceLoader.h"
+#include "CachedScript.h"
 #include "CookieJar.h"
 #include "CrossOriginAccessControl.h"
 #include "DefaultResourceLoadPriority.h"
@@ -985,8 +986,12 @@ ResourceCryptographicDigest CachedResource::cryptographicDigest(ResourceCryptogr
     RELEASE_ASSERT(digestIndex < m_cryptographicDigests.size());
     ASSERT(std::to_underlying(algorithm) == (1 << digestIndex));
     auto& existingDigest = m_cryptographicDigests[digestIndex];
-    if (!existingDigest)
+    if (!existingDigest) {
+        // A parked script holds no bytes to digest.
+        if (auto* script = dynamicDowncast<CachedScript>(const_cast<CachedResource&>(*this)))
+            script->unpark();
         existingDigest = cryptographicDigestForSharedBuffer(algorithm, protect(m_data).get());
+    }
     return *existingDigest;
 }
 

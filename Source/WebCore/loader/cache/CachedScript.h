@@ -32,6 +32,7 @@
 namespace WebCore {
 
 class TextResourceDecoder;
+struct CachedScriptParking;
 
 enum class ScriptTrackingPrivacyProtectionsEnabled : bool { No, Yes };
 
@@ -48,7 +49,18 @@ public:
 
     bool requiresPrivacyProtections() const { return m_requiresPrivacyProtections; }
 
+    // A parked script holds a compressed copy of its bytes in place of the bytes, and gets them
+    // back the next time its text is read. Scripts whose text has not been read for a while are
+    // parked while parking is enabled, which the web process does while it shows no page.
+    // script() and withScriptConcurrently() unpark or read through as needed; anything else that
+    // reads resourceBuffer() of a script calls unpark() first. Main thread, like script().
+    static void setParkingEnabled(bool);
+    void unpark();
+
 private:
+    struct ParkedBytes;
+    friend struct CachedScriptParking;
+
     bool mayTryReplaceEncodedData() const final { return true; }
 
     void setEncoding(const String&) final;
@@ -60,14 +72,16 @@ private:
 
     void setBodyDataFrom(const CachedResource&) final;
 
-    // m_script, m_wasForceDecodedAsUTF8, m_decodingState and m_decoder are written on the main thread
-    // under m_lock and read on other threads by withScriptConcurrently(), which locks; the main
-    // thread's own reads use assertIsOwnerThread() instead of locking. m_scriptHash is not read off
-    // the main thread, so it needs no guard.
+    // m_script, m_wasForceDecodedAsUTF8, m_decodingState, m_decoder and m_parkedBytes are written on
+    // the main thread under m_lock and read on other threads by withScriptConcurrently(), which
+    // locks; the main thread's own reads use assertIsOwnerThread() instead of locking. Parking and
+    // unparking also replace m_data under m_lock, for the same reader. m_scriptHash and
+    // m_wasReadSinceParkingPass are not read off the main thread, so they need no guard.
     String m_script WTF_GUARDED_BY_LOCK(m_lock);
     unsigned m_scriptHash { 0 };
     bool m_wasForceDecodedAsUTF8 WTF_GUARDED_BY_LOCK(m_lock) { false };
     bool m_requiresPrivacyProtections { false };
+    bool m_wasReadSinceParkingPass { true };
 
     enum DecodingState : uint8_t { NeverDecoded, DataAndDecodedStringHaveSameBytes, DataAndDecodedStringHaveDifferentBytes };
     DecodingState m_decodingState WTF_GUARDED_BY_LOCK(m_lock) { NeverDecoded };
@@ -75,6 +89,9 @@ private:
     mutable Lock m_lock;
 
     RefPtr<TextResourceDecoder> m_decoder WTF_GUARDED_BY_LOCK(m_lock);
+
+    // Non-null exactly while parked, and then m_data is null.
+    std::unique_ptr<ParkedBytes> m_parkedBytes WTF_GUARDED_BY_LOCK(m_lock);
 
     WTF_DECLARE_OWNER_THREAD_ASSERTIONS(m_lock, mainThreadLike);
 };

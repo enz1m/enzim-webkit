@@ -29,14 +29,31 @@
 
 #include "CachedResourceClient.h"
 #include "CachedResourceRequest.h"
+#include "CommonVM.h"
+#include "MIMETypeRegistry.h"
+#include "MemoryCache.h"
+#include "MemoryRelease.h"
 #include "SharedBuffer.h"
 #include "TextResourceDecoder.h"
+#include "Timer.h"
+#include <JavaScriptCore/VM.h>
+#include <wtf/MainThread.h>
+#include <wtf/NeverDestroyed.h>
+#include <wtf/Threading.h>
+#include <zlib.h>
 
 #if PLATFORM(MAC)
 #include <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
 #endif
 
 namespace WebCore {
+
+// What a parked script holds in place of its bytes.
+struct CachedScript::ParkedBytes {
+    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(ParkedBytes);
+    Vector<uint8_t> deflated;
+    size_t size { 0 };
+};
 
 CachedScript::CachedScript(CachedResourceRequest&& request, PAL::SessionID sessionID, const CookieJar* cookieJar, ScriptTrackingPrivacyProtectionsEnabled requiresPrivacyProtections)
     : CachedResource(WTF::move(request), request.options().destination == FetchOptionsDestination::Json ? Type::JSON : request.options().destination == FetchOptionsDestination::Text ? Type::Text : Type::Script, sessionID, cookieJar)
@@ -46,6 +63,216 @@ CachedScript::CachedScript(CachedResourceRequest&& request, PAL::SessionID sessi
 }
 
 CachedScript::~CachedScript() = default;
+
+// Parking, after Chromium's ParkableString: script text is the largest thing a page keeps only in
+// case it is read again, which happens when a function is first compiled or compiled again, printed
+// or reported in an error. Passes run on the main thread while parking is enabled. The first parks
+// every eligible script, since it follows the trim that dropped all compiled code; later ones park
+// those whose text was not read since the pass before. The bytes are deflated on a short-lived
+// thread and swapped in back on the main thread, if the script was left alone meanwhile.
+struct CachedScriptParking {
+    // Smaller scripts save little, and many of them cost a table entry each when read.
+    static constexpr size_t minimumSize = 16 * KB;
+    static constexpr Seconds passInterval { 30_s };
+
+    static bool s_enabled;
+    static bool s_passInFlight;
+
+    // WPE_HIDDEN_PROCESS_TRIM_TRACE=1 also reports what each pass parked and each script read back.
+    static bool shouldTrace()
+    {
+        static const bool trace = [] {
+            const char* value = getenv("WPE_HIDDEN_PROCESS_TRIM_TRACE");
+            return value && *value == '1';
+        }();
+        return trace;
+    }
+
+    static Vector<CachedResourceHandle<CachedScript>>& pendingScripts()
+    {
+        static NeverDestroyed<Vector<CachedResourceHandle<CachedScript>>> scripts;
+        return scripts;
+    }
+
+    static Timer& passTimer()
+    {
+        static NeverDestroyed<Timer> timer { [] { startPass(false); } };
+        return timer;
+    }
+
+    static bool canPark(CachedScript& script)
+    {
+        script.assertIsOwnerThread();
+        if (script.type() != CachedResource::Type::Script || !script.isLoaded() || script.errorOccurred() || script.m_parkedBytes)
+            return false;
+        RefPtr data = script.m_data;
+        if (!data || data->size() < minimumSize || !data->isContiguous())
+            return false;
+        // A file mapping is not this process's memory to save.
+        if (data->begin()->segment->containsMappedFileData())
+            return false;
+        // A WebAssembly module's provider reads resourceBuffer() from compiler threads.
+        if (MIMETypeRegistry::isSupportedWebAssemblyMIMEType(script.response().mimeType()))
+            return false;
+        return true;
+    }
+
+    // A pass has work while some script was read since the last one. The timer stops when a pass
+    // finds none, and a read or a finished load starts it again.
+    static void noteScriptToConsider()
+    {
+        if (s_enabled && !passTimer().isActive())
+            passTimer().startRepeating(passInterval);
+    }
+
+    static void startPass(bool regardlessOfRecentReads)
+    {
+        ASSERT(isMainThread());
+        if (!s_enabled || s_passInFlight)
+            return;
+
+        Vector<Ref<SharedBuffer>> buffers;
+        auto& scripts = pendingScripts();
+        ASSERT(scripts.isEmpty());
+        bool sawRecentRead = false;
+        MemoryCache::singleton().forEachResource([&](CachedResource& resource) {
+            RefPtr script = dynamicDowncast<CachedScript>(resource);
+            if (!script || !canPark(*script))
+                return;
+            if (std::exchange(script->m_wasReadSinceParkingPass, false) && !regardlessOfRecentReads) {
+                sawRecentRead = true;
+                return;
+            }
+            Ref bytes = downcast<SharedBuffer>(*script->m_data);
+            // A script mapped from the disk cache is parked by letting go of its pages. Compressing
+            // it would trade pages the system can drop for memory of this process's own.
+#if ENABLE(SHAREABLE_RESOURCE)
+            if (releaseResidentPagesIfMappedResource(bytes->span()))
+                return;
+#endif
+            buffers.append(WTF::move(bytes));
+            scripts.append(script.get());
+        });
+        if (buffers.isEmpty()) {
+            if (!sawRecentRead)
+                passTimer().stop();
+            return;
+        }
+
+        s_passInFlight = true;
+        // A thread of its own, so that what the deflater allocates goes back when it exits. The
+        // buffers return to the main thread with the result, which keeps their last reference
+        // from being dropped here.
+        Thread::create("ScriptTextParking"_s, [buffers = WTF::move(buffers)]() mutable {
+            auto deflated = buffers.map([](auto& buffer) {
+                auto bytes = buffer->span();
+                Vector<uint8_t> result;
+                uLongf length = compressBound(bytes.size());
+                result.grow(length);
+                if (compress2(result.mutableSpan().data(), &length, bytes.data(), bytes.size(), Z_DEFAULT_COMPRESSION) != Z_OK)
+                    return Vector<uint8_t> { };
+                result.shrink(length);
+                result.shrinkToFit();
+                return result;
+            });
+            callOnMainThread([buffers = WTF::move(buffers), deflated = WTF::move(deflated)]() mutable {
+                finishPass(WTF::move(buffers), WTF::move(deflated));
+            });
+        }, ThreadType::Unknown, Thread::QOS::Background)->detach();
+    }
+
+    static void finishPass(Vector<Ref<SharedBuffer>>&& buffers, Vector<Vector<uint8_t>>&& deflated)
+    {
+        ASSERT(isMainThread());
+        auto scripts = std::exchange(pendingScripts(), { });
+        s_passInFlight = false;
+        // Text read on this stack may still be in use: this can run in a run loop nested below
+        // JavaScript. Nothing is lost by leaving these scripts to a later pass.
+        auto* vm = commonVMOrNull();
+        if (!s_enabled || (vm && (vm->isEntered() || vm->currentThreadIsHoldingAPILock()))) {
+            for (auto& script : scripts) {
+                if (RefPtr protectedScript = script.get())
+                    protectedScript->m_wasReadSinceParkingPass = true;
+            }
+            return;
+        }
+        size_t parkedCount = 0;
+        size_t parkedSize = 0;
+        size_t deflatedSize = 0;
+        for (size_t index = 0; index < scripts.size(); ++index) {
+            RefPtr script = scripts[index].get();
+            if (!script || deflated[index].isEmpty())
+                continue;
+            size_t size = deflated[index].size();
+            if (!parkIfUntouched(*script, buffers[index], WTF::move(deflated[index])))
+                continue;
+            ++parkedCount;
+            parkedSize += buffers[index]->size();
+            deflatedSize += size;
+        }
+        if (shouldTrace())
+            WTFLogAlways("WPE_SCRIPT_PARKING pass candidates=%zu parked=%zu bytesK=%zu deflatedK=%zu", scripts.size(), parkedCount, parkedSize / KB, deflatedSize / KB);
+    }
+
+    static bool parkIfUntouched(CachedScript& script, SharedBuffer& bytes, Vector<uint8_t>&& deflated)
+    {
+        script.assertIsOwnerThread();
+        // Read, replaced or released since the pass began.
+        bool untouched = !script.m_wasReadSinceParkingPass && script.m_data == &bytes && !script.m_parkedBytes;
+        script.releaseOwnerThreadAssertion();
+        if (!untouched)
+            return false;
+        auto parked = makeUnique<CachedScript::ParkedBytes>();
+        parked->size = bytes.size();
+        parked->deflated = WTF::move(deflated);
+        Locker locker { script.m_lock };
+        script.m_parkedBytes = WTF::move(parked);
+        script.m_data = nullptr;
+        return true;
+    }
+
+    static Ref<SharedBuffer> inflate(const CachedScript::ParkedBytes& parked)
+    {
+        Vector<uint8_t> bytes;
+        bytes.grow(parked.size);
+        uLongf length = parked.size;
+        int result = uncompress(bytes.mutableSpan().data(), &length, parked.deflated.span().data(), parked.deflated.size());
+        // The deflated copy is this process's own and the only one. Running a script with missing
+        // text would be worse than stopping here.
+        RELEASE_ASSERT(result == Z_OK && length == parked.size);
+        return SharedBuffer::create(WTF::move(bytes));
+    }
+};
+
+bool CachedScriptParking::s_enabled;
+bool CachedScriptParking::s_passInFlight;
+
+void CachedScript::setParkingEnabled(bool enabled)
+{
+    ASSERT(isMainThread());
+    if (!enabled) {
+        CachedScriptParking::s_enabled = false;
+        CachedScriptParking::passTimer().stop();
+        return;
+    }
+    CachedScriptParking::s_enabled = true;
+    CachedScriptParking::passTimer().startRepeating(CachedScriptParking::passInterval);
+    CachedScriptParking::startPass(true);
+}
+
+void CachedScript::unpark()
+{
+    assertIsOwnerThread();
+    if (!m_parkedBytes) [[likely]]
+        return;
+    auto data = CachedScriptParking::inflate(*m_parkedBytes);
+    if (CachedScriptParking::shouldTrace())
+        WTFLogAlways("WPE_SCRIPT_PARKING read bytesK=%zu", data->size() / KB);
+    releaseOwnerThreadAssertion();
+    Locker locker { m_lock };
+    m_data = WTF::move(data);
+    m_parkedBytes = nullptr;
+}
 
 void CachedScript::setEncoding(const String& chs)
 {
@@ -60,6 +287,11 @@ ASCIILiteral CachedScript::encoding() const
 
 StringView CachedScript::script(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
 {
+    if (!m_wasReadSinceParkingPass) [[unlikely]] {
+        m_wasReadSinceParkingPass = true;
+        CachedScriptParking::noteScriptToConsider();
+    }
+    unpark();
     assertIsOwnerThread();
 
     if (!m_data)
@@ -124,6 +356,9 @@ void CachedScript::withScriptConcurrently(ShouldDecodeAsUTF8Only shouldDecodeAsU
 {
     Locker locker { m_lock };
     auto data = m_data;
+    // A private copy for this call; only the main thread unparks.
+    if (m_parkedBytes)
+        data = CachedScriptParking::inflate(*m_parkedBytes);
     if (!data) {
         function(emptyString());
         return;
@@ -176,6 +411,12 @@ unsigned CachedScript::scriptHash(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
 
 void CachedScript::finishLoading(const FragmentedSharedBuffer* data, const NetworkLoadMetrics& metrics)
 {
+    {
+        Locker locker { m_lock };
+        m_parkedBytes = nullptr;
+    }
+    m_wasReadSinceParkingPass = true;
+    CachedScriptParking::noteScriptToConsider();
     if (data) {
         m_data = data->makeContiguous();
         setEncodedSize(data->size());
@@ -199,6 +440,8 @@ void CachedScript::setBodyDataFrom(const CachedResource& resource)
 {
     ASSERT(resource.type() == type());
     auto& script = downcast<const CachedScript>(resource);
+    // The base class copies the bytes.
+    const_cast<CachedScript&>(script).unpark();
 
     CachedResource::setBodyDataFrom(resource);
 

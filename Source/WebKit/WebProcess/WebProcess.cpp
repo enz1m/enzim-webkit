@@ -2012,6 +2012,14 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
                 size_t heapPagesReleased = releaseHeapPages ? releaseFreePagesInJavaScriptHeapBlocks(commonVM()) : 0;
                 WTF::releaseFastMallocFreeMemory();
                 process->releaseSystemMallocMemory();
+                // With the code gone, script text is read only to compile a function again.
+                // WPE_SCRIPT_TEXT_PARKING=0 keeps it as it is.
+                static const bool parkScriptText = [] {
+                    const char* value = getenv("WPE_SCRIPT_TEXT_PARKING");
+                    return !value || *value != '0';
+                }();
+                if (parkScriptText)
+                    WebCore::setScriptTextParkingEnabled(true);
 #if ENABLE(SHAREABLE_RESOURCE)
                 WebCore::releaseResidentPagesOfMappedResources();
 #endif
@@ -2042,8 +2050,10 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
             });
         }
         if (trimDelay > 0_s) {
-            if (hasVisibleWebPage())
+            if (hasVisibleWebPage()) {
                 trimTimer->stop();
+                WebCore::setScriptTextParkingEnabled(false);
+            }
             else
                 trimTimer->startOneShot(trimDelay);
         }

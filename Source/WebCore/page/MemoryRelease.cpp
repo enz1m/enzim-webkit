@@ -30,6 +30,7 @@
 #include "BackForwardCache.h"
 #include "CSSFontSelector.h"
 #include "CSSValuePool.h"
+#include "CachedScript.h"
 #include "Chrome.h"
 #include "ChromeClient.h"
 #include "CommonVM.h"
@@ -210,6 +211,11 @@ static void releaseCriticalMemory(Synchronous synchronous, MaintainBackForwardCa
     }
 
     WorkerGlobalScope::releaseMemoryInWorkers(synchronous);
+}
+
+void setScriptTextParkingEnabled(bool enabled)
+{
+    CachedScript::setParkingEnabled(enabled);
 }
 
 void releaseMemory(Critical critical, Synchronous synchronous, MaintainBackForwardCache maintainBackForwardCache, MaintainMemoryCache maintainMemoryCache)

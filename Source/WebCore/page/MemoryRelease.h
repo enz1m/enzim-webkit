@@ -46,6 +46,9 @@ void platformReleaseGraphicsMemory(Critical);
 void jettisonExpensiveObjectsOnTopLevelNavigation();
 WEBCORE_EXPORT void registerMemoryReleaseNotifyCallbacks();
 WEBCORE_EXPORT void logMemoryStatistics(LogMemoryStatisticsReason);
+// While enabled, scripts whose text has not been read for a while keep a compressed copy of it
+// instead (see CachedScript). For a process that shows no page.
+WEBCORE_EXPORT void setScriptTextParkingEnabled(bool);
 // Resources mapped from the disk cache stop being resident in this process until they are read
 // again: all of them, or the one these bytes are, if they are one. Defined with ShareableResource.
 WEBCORE_EXPORT void releaseResidentPagesOfMappedResources();
