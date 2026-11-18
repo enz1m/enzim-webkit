@@ -17,3 +17,14 @@ PGO training profiles are not distributed here. Reproducing an optimized runtime
 requires compatible compiler flags, dependencies and training data as well as
 the source. Application developers can use a matching prebuilt runtime and SDK;
 they do not need to rebuild WebKit for every application.
+
+## CPU baseline
+
+Native releases target baseline x86-64. Leave `ENABLE_X86_64_V3=OFF` and use
+`-march=x86-64` for the C and C++ release configuration. Do not use
+`-march=native` for distributed binaries.
+
+`-DENABLE_X86_64_V3=ON` is an opt-in build for CPUs supporting the complete
+x86-64-v3 feature set. Omit a conflicting `-march` override when enabling it.
+Runtime-dispatched SIMD implementations can still use newer instructions in
+the baseline build when the detected CPU supports them.

@@ -362,6 +362,13 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
 
     include(WebKitSwiftFlags)
 
+    if (ENABLE_X86_64_V3)
+        if (NOT WTF_CPU_X86_64 OR NOT COMPILER_IS_GCC_OR_CLANG)
+            message(FATAL_ERROR "ENABLE_X86_64_V3 requires an x86-64 GCC or Clang target.")
+        endif ()
+        WEBKIT_PREPEND_GLOBAL_COMPILER_FLAGS("-march=x86-64-v3")
+    endif ()
+
     # Check gperf after including OptionsXXX.cmake since gperf is required only when ENABLE_WEBCORE is true,
     # and ENABLE_WEBCORE is configured in OptionsXXX.cmake.
     if (ENABLE_WEBCORE)
