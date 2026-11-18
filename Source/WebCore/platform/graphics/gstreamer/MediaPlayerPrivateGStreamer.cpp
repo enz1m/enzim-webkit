@@ -589,8 +589,6 @@ bool MediaPlayerPrivateGStreamer::paused() const
 
 struct AsyncSeekData {
     GRefPtr<GstEvent> event;
-    bool isSegmentSeek;
-    bool isSeamlessSeekingEnabled;
 };
 WEBKIT_DEFINE_ASYNC_DATA_STRUCT(AsyncSeekData);
 
@@ -617,13 +615,17 @@ bool MediaPlayerPrivateGStreamer::doSeek(const SeekTarget& target, float rate, b
         g_object_set(m_downloadBuffer.get(), "high-percent", 0, nullptr);
     }
 
-    auto flag = (player->isLooping() && isSegment) ? GST_SEEK_FLAG_SEGMENT : GST_SEEK_FLAG_FLUSH;
     if (paused() && !m_isEndReached && player->isLooping()) {
-        GST_DEBUG_OBJECT(pipeline(), "Segment non-flushing seek attempt not supported on a paused pipeline, enabling flush");
+        GST_DEBUG_OBJECT(pipeline(), "Segment seek attempt not supported on a paused pipeline");
         m_isSegmentSeekAllowed = false;
-        flag = GST_SEEK_FLAG_FLUSH;
     }
-    auto seekFlags = static_cast<GstSeekFlags>(flag | GST_SEEK_FLAG_ACCURATE);
+    // Every seek flushes. A non-flushing seek holds the pipeline's state lock while a pull-mode
+    // demuxer waits for its streaming thread, and that thread can be waiting for prerolled sinks
+    // to reach PLAYING or for data only the main thread delivers; both need the lock. Seamless
+    // looping sets SEGMENT on this flushing seek instead of following it with a non-flushing one.
+    UNUSED_PARAM(isSegment);
+    auto segment = isSeamlessSeekingEnabled() ? GST_SEEK_FLAG_SEGMENT : GST_SEEK_FLAG_NONE;
+    auto seekFlags = static_cast<GstSeekFlags>(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE | segment);
 
     // Seeking towards the end is not well supported in oggdemux, sometimes it receives EOS
     // while trying to retrieve a chain and thus disables seeking in push mode.
@@ -657,45 +659,15 @@ bool MediaPlayerPrivateGStreamer::doSeek(const SeekTarget& target, float rate, b
     if (isAsync) {
         auto data = createAsyncSeekData();
         data->event = WTF::move(event);
-        data->isSegmentSeek = isSegment;
-        data->isSeamlessSeekingEnabled = isSeamlessSeekingEnabled();
         gst_element_call_async(m_pipeline.get(), reinterpret_cast<GstElementCallAsyncFunc>(+[](GstElement* pipeline, gpointer userData) {
             auto data = reinterpret_cast<AsyncSeekData*>(userData);
-
-            gdouble rate;
-            GstFormat format;
-            GstSeekFlags flags;
-            GstSeekType startType, stopType;
-            int64_t start, stop;
-            gst_event_parse_seek(data->event.get(), &rate, &format, &flags, &startType, &start, &stopType, &stop);
-            if (!gst_element_send_event(pipeline, data->event.leakRef()))
-                return;
-
-            if (data->isSegmentSeek || !data->isSeamlessSeekingEnabled)
-                return;
-
-            GST_DEBUG_OBJECT(pipeline, "Resuming segment playback");
-            flags = static_cast<GstSeekFlags>(GST_SEEK_FLAG_SEGMENT | GST_SEEK_FLAG_ACCURATE);
-            gst_element_send_event(pipeline, gst_event_new_seek(rate, format, flags, startType, start, stopType, stop));
+            gst_element_send_event(pipeline, data->event.leakRef());
         }), data, reinterpret_cast<GDestroyNotify>(destroyAsyncSeekData));
 
         return true;
     }
 
-    auto result = gst_element_send_event(m_pipeline.get(), event.leakRef());
-    if (isSegment || !isSeamlessSeekingEnabled() || !result)
-        return result;
-
-    // A non-flushing seek makes a pull-mode demuxer wait for its streaming thread, which can itself
-    // be waiting for media data that only this thread delivers. Send it from GStreamer's thread, as
-    // the asynchronous path above does.
-    GST_DEBUG_OBJECT(m_pipeline.get(), "Resuming segment playback");
-    seekFlags = static_cast<GstSeekFlags>(GST_SEEK_FLAG_SEGMENT | GST_SEEK_FLAG_ACCURATE);
-    auto* resume = gst_event_new_seek(rate, GST_FORMAT_TIME, seekFlags, GST_SEEK_TYPE_SET, seekStart, GST_SEEK_TYPE_SET, seekStop);
-    gst_element_call_async(m_pipeline.get(), reinterpret_cast<GstElementCallAsyncFunc>(+[](GstElement* pipeline, gpointer event) {
-        gst_element_send_event(pipeline, GST_EVENT_CAST(event));
-    }), resume, nullptr);
-    return true;
+    return gst_element_send_event(m_pipeline.get(), event.leakRef());
 }
 
 Ref<MediaTimePromise> MediaPlayerPrivateGStreamer::seekToTarget(const SeekTarget& inTarget)
@@ -4232,22 +4204,12 @@ void MediaPlayerPrivateGStreamer::invalidateCachedPositionOnNextIteration() cons
 
 bool MediaPlayerPrivateGStreamer::isSeamlessSeekingEnabled() const
 {
-    RefPtr player = m_player.get();
-    if (!player) [[unlikely]]
-        return false;
-
-    // Seamless seeking makes more sense for videos, in order to avoid a frame flushing when looping
-    // back to the beginning of the media.
-    if (!player->isVideoPlayer())
-        return false;
-
-    // The GStreamer oggdemux element doesn't handle segment seeks.
-    if (m_containerType == ContainerType::Ogg) {
-        GST_DEBUG_OBJECT(m_pipeline.get(), "Seamless seeking not supported for media muxed in Ogg container");
-        return false;
-    }
-
-    return player->isLooping() && m_isSegmentSeekAllowed;
+    // Segment looping is off. The demuxer posts segment-done when it has read the whole segment,
+    // ahead of the queued data still playing, and didEnd() then flushes back to the start, which
+    // cut every loop short. Keeping the queued data needs a non-flushing segment seek, and such a
+    // seek deadlocks while the sinks are prerolled or the source waits on the main thread. Looping
+    // through end-of-stream plays each iteration to its end.
+    return false;
 }
 
 void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
