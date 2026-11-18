@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<style>
+body { margin: 0; background: white; }
+.row { position: relative; height: 70px; }
+.thumb { position: absolute; width: 20px; height: 20px; background: lime; left: 20px; top: 20px; }
+.shadow { filter: drop-shadow(0 0 1px black); }
+.blur { filter: blur(0.1px); }
+#nested { position: absolute; left: 0; top: 0; width: 200px; height: 60px; filter: blur(0.1px); }
+#contents span { display: block; width: 20px; height: 20px; background: red; }
+#left, #inner { left: 100px; }
+#top { top: 40px; }
+#transform { transform: translateX(80px); }
+#contents span { background: lime; }
+</style>
+<div class="row"><div id="left" class="thumb shadow"></div></div>
+<div class="row"><div id="top" class="thumb blur"></div></div>
+<div class="row"><div id="transform" class="thumb shadow"></div></div>
+<div class="row"><div id="nested"><div id="inner" class="thumb shadow"></div></div></div>
+<div class="row"><div id="contents" class="thumb shadow"><span></span></div></div>

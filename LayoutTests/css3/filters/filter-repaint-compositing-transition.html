@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<title>Moving a filtered layer after removing its compositing hint repaints both locations</title>
+<link rel="match" href="filter-repaint-compositing-transition-expected.html">
+<script src="../../resources/ui-helper.js"></script>
+<style>
+body { margin: 0; background: white; }
+#thumb { position: absolute; left: 20px; top: 20px; width: 20px; height: 20px; background: lime; filter: drop-shadow(0 0 1px black); }
+</style>
+<script>
+window.testRunner?.waitUntilDone();
+window.testRunner?.dontForceRepaint();
+window.addEventListener("load", async () => {
+    await UIHelper.renderingUpdate();
+    const thumb = document.getElementById("thumb");
+    thumb.style.willChange = "auto";
+    await UIHelper.renderingUpdate();
+    thumb.style.left = "100px";
+    await UIHelper.renderingUpdate();
+    await UIHelper.renderingUpdate();
+    window.testRunner?.notifyDone();
+});
+</script>
+<div id="thumb" style="will-change: transform"></div>

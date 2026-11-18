@@ -882,7 +882,8 @@ public:
         bool fullRepaintIsScheduled { false }; // Either the repaint container or a layer in-between has already been scheduled for full repaint.
         CheckedPtr<const RenderLayerModelObject> renderer { nullptr };
     };
-    RepaintContainerStatus containerForRepaint() const;
+    enum class RepaintContainerType : bool { Content, LayerGeometry };
+    RepaintContainerStatus containerForRepaint(RepaintContainerType = RepaintContainerType::Content) const;
     // Actually do the repaint of rect r for this object which has been computed in the coordinate space
     // of repaintContainer. If repaintContainer is nullptr, repaint via the view.
     enum class ClipRepaintToLayer : bool { No, Yes };

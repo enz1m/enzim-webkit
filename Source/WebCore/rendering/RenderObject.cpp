@@ -893,7 +893,7 @@ LayoutRect RenderObject::subtreePaintRootRect(LayoutRect& topLevelRect, RespectT
     return result;
 }
 
-RenderObject::RepaintContainerStatus RenderObject::containerForRepaint() const
+RenderObject::RepaintContainerStatus RenderObject::containerForRepaint(RepaintContainerType type) const
 {
     CheckedPtr<const RenderLayerModelObject> repaintContainer;
     auto fullRepaintAlreadyScheduled = false;
@@ -910,7 +910,10 @@ RenderObject::RepaintContainerStatus RenderObject::containerForRepaint() const
                 }
             }
             if (hasRenderersWithPixelMovingFilter) {
-                if (CheckedPtr pixelMovingFilterLayer = enclosingLayer->enclosingPixelMovingFilterLayer()) {
+                // A software filter's own movement must be compared outside its local coordinate space.
+                // Content invalidation still targets the filter so its dirty source rect and outsets propagate.
+                auto includeSelf = type == RepaintContainerType::LayerGeometry && &enclosingLayer->renderer() == this ? ExcludeSelf : IncludeSelf;
+                if (CheckedPtr pixelMovingFilterLayer = enclosingLayer->enclosingPixelMovingFilterLayer(includeSelf)) {
                     fullRepaintAlreadyScheduled = enclosingLayer->scheduledFullRepaintCoversContentPaintedBy(*enclosingLayer);
                     return { fullRepaintAlreadyScheduled, &pixelMovingFilterLayer->renderer() };
                 }

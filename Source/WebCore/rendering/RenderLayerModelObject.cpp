@@ -136,7 +136,7 @@ void RenderLayerModelObject::removeOnlyThisLayerWithRepaint()
     ASSERT(m_layer && m_layer->parent());
     // Repaint the about-to-be-destroyed self-painting layer when a repaint is pending.
     if (m_layer->isSelfPaintingLayer() && m_layer->repaintStatus() == RepaintStatus::NeedsFullRepaint && m_layer->cachedClippedOverflowRect())
-        repaintUsingContainer(containerForRepaint().renderer.get(), *m_layer->cachedClippedOverflowRect());
+        repaintUsingContainer(m_layer->repaintContainer(), *m_layer->cachedClippedOverflowRect());
     m_layer->removeOnlyThisLayer();
 }
 

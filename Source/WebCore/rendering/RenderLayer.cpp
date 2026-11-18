@@ -1341,7 +1341,7 @@ void RenderLayer::recursiveUpdateLayerPositions(OptionSet<UpdateLayerPositionsFl
 
     auto repaintIfNecessary = [&](bool checkForRepaint) {
         if (mode == Verify) {
-            WeakPtr repaintContainer = renderer().containerForRepaint().renderer.get();
+            WeakPtr repaintContainer = renderer().containerForRepaint(RenderObject::RepaintContainerType::LayerGeometry).renderer.get();
             LAYER_POSITIONS_ASSERT(repaintRects() || (isSubtreeVisibilityHiddenOrOpacityZero() || !isSelfPaintingLayer()));
             LAYER_POSITIONS_ASSERT(m_repaintContainer == repaintContainer);
 #if LAYER_POSITIONS_ASSERT_ENABLED
@@ -1359,7 +1359,7 @@ void RenderLayer::recursiveUpdateLayerPositions(OptionSet<UpdateLayerPositionsFl
         // LayoutState outside the layout() phase and use it here.
         ASSERT(!renderer().view().frameView().layoutContext().isPaintOffsetCacheEnabled());
 
-        WeakPtr repaintContainer = renderer().containerForRepaint().renderer.get();
+        WeakPtr repaintContainer = renderer().containerForRepaint(RenderObject::RepaintContainerType::LayerGeometry).renderer.get();
 
         auto oldRects = repaintRects();
         setNeedsFullRepaintIfSVGContainerTransformChanged(repaintContainer.get());
@@ -1567,11 +1567,11 @@ void RenderLayer::updateRepaintRectsIncludingDescendants(RepaintRectsUpdate upda
     // FIXME: computeRepaintRects() has to walk up the parent chain for every layer to compute the rects.
     // We should make this more efficient.
     if (update == RepaintRectsUpdate::Recompute) {
-        computeRepaintRects(renderer().containerForRepaint().renderer.get());
+        computeRepaintRects(renderer().containerForRepaint(RenderObject::RepaintContainerType::LayerGeometry).renderer.get());
         clearClipRects(PaintingClipRects);
     } else {
         clearRepaintRects();
-        m_repaintContainer = renderer().containerForRepaint().renderer.get();
+        m_repaintContainer = renderer().containerForRepaint(RenderObject::RepaintContainerType::LayerGeometry).renderer.get();
     }
 
     for (RenderLayer* layer = firstChild(); layer; layer = layer->nextSibling())
@@ -1659,7 +1659,7 @@ void RenderLayer::recursiveUpdateLayerPositionsAfterScroll(OptionSet<UpdateLayer
     bool shouldComputeRepaintRects = (flags.contains(HasSeenViewportConstrainedAncestor) || flags.containsAll({ IsOverflowScroll, HasSeenAncestorWithOverflowClip })) && isSelfPaintingLayer();
     // FIXME: We could track the repaint container as we walk down the tree.
     if (shouldComputeRepaintRects)
-        computeRepaintRects(renderer().containerForRepaint().renderer.get());
+        computeRepaintRects(renderer().containerForRepaint(RenderObject::RepaintContainerType::LayerGeometry).renderer.get());
 
     for (auto* child = firstChild(); child; child = child->nextSibling())
         child->recursiveUpdateLayerPositionsAfterScroll(flags);
@@ -1992,7 +1992,7 @@ void RenderLayer::setHasVisibleContent()
 
     m_visibleContentStatusDirty = false; 
     m_hasVisibleContent = true;
-    computeRepaintRects(renderer().containerForRepaint().renderer.get());
+    computeRepaintRects(renderer().containerForRepaint(RenderObject::RepaintContainerType::LayerGeometry).renderer.get());
     setNeedsPositionUpdate();
     if (!isNormalFlowOnly()) {
         // We don't collect invisible layers in z-order lists if they are not composited.
@@ -6154,10 +6154,10 @@ void RenderLayer::setBackingNeedsRepaintInRect(const LayoutRect& r, GraphicsLaye
         backing()->setContentsNeedDisplayInRect(r, shouldClip);
 }
 
-// Since we're only painting non-composited layers, we know that they all share the same repaintContainer.
 void RenderLayer::repaintIncludingNonCompositingDescendants(const RenderLayerModelObject* repaintContainer)
 {
-    auto clippedOverflowRect = m_repaintRectsValid ? m_repaintRects.clippedOverflowRect : renderer().clippedOverflowRectForRepaint(repaintContainer);
+    // Software-filter descendants can cache bounds relative to a different repaint container.
+    auto clippedOverflowRect = m_repaintRectsValid && m_repaintContainer.get() == repaintContainer ? m_repaintRects.clippedOverflowRect : renderer().clippedOverflowRectForRepaint(repaintContainer);
     renderer().repaintUsingContainer(repaintContainer, clippedOverflowRect);
 
     for (RenderLayer* curr = firstChild(); curr; curr = curr->nextSibling()) {

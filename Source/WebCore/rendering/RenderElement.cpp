@@ -575,7 +575,7 @@ bool RenderElement::repaintBeforeStyleChange(Style::Difference diff, const Style
                 return false;
             }
             if (auto cachedClippedOverflowRect = downcast<RenderLayerModelObject>(*this).layer()->cachedClippedOverflowRect()) {
-                repaintUsingContainer(containerForRepaint().renderer.get(), *cachedClippedOverflowRect);
+                repaintUsingContainer(downcast<RenderLayerModelObject>(*this).layer()->repaintContainer(), *cachedClippedOverflowRect);
                 return true;
             }
         }
