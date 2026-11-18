@@ -353,6 +353,10 @@ private:
 
         GrContextOptions options;
         options.fAllowMSAAOnNewIntel = shouldAllowMSAAOnNewIntel();
+        // Skia keeps 256 linked programs by default, and the driver keeps each one's intermediate
+        // code: 89 MiB of driver allocations in the GPU process after eleven pages, 35 MiB with
+        // 48 programs, with no difference in compositing time. A frame uses a few dozen.
+        options.fRuntimeProgramCacheSize = 64;
         if (auto limit = parseInteger<unsigned>(String::fromLatin1(getenv("WEBKIT_SKIA_PROGRAM_CACHE_LIMIT"))); limit && *limit >= 16 && *limit <= 256)
             options.fRuntimeProgramCacheSize = static_cast<int>(*limit);
         // Skia defaults this to true, which alters the texture2D() calls in all generated shaders,
