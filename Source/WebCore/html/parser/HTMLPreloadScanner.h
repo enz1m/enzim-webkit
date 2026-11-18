@@ -42,6 +42,7 @@ namespace WebCore {
 // viewport.
 struct PreloadScannerPictureState {
     bool sourceMatched { false };
+    bool preloadAllowed { true };
     std::unique_ptr<PreloadRequest> bufferedSourceRequest;
 };
 
@@ -105,6 +106,7 @@ public:
 
     void appendToEnd(const SegmentedString&);
     void scan(HTMLResourcePreloader&, Document&);
+    bool stopsAtHttpEquiv() const { return m_stopAtHttpEquiv; }
 
 private:
     TokenPreloadScanner m_scanner;

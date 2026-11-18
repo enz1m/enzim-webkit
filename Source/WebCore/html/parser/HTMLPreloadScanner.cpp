@@ -553,6 +553,7 @@ void TokenPreloadScanner::scan(const HTMLToken& token, Vector<std::unique_ptr<Pr
         }
         if (tagId == TagId::Picture) {
             m_pictureSourceState.append({ });
+            m_pictureSourceState.last().preloadAllowed = !!document.documentElement();
             return;
         }
         if (tagId == TagId::Svg) {
@@ -574,6 +575,10 @@ void TokenPreloadScanner::scan(const HTMLToken& token, Vector<std::unique_ptr<Pr
             if (equalSpans(token.name().span(), std::span { imageAsUTF16 }))
                 return;
         }
+
+        // Media-query evaluation is unknown until the document element exists.
+        if ((tagId == TagId::Source || tagId == TagId::Img) && !m_pictureSourceState.isEmpty() && !m_pictureSourceState.last().preloadAllowed)
+            return;
 
         StartTagScanner scanner(document, tagId, m_deviceScaleFactor);
         scanner.processAttributes(token.attributes(), m_pictureSourceState);
@@ -628,6 +633,8 @@ HTMLPreloadScanner::HTMLPreloadScanner(const HTMLParserOptions& options, const U
 
 void HTMLPreloadScanner::appendToEnd(const SegmentedString& source)
 {
+    if (m_stoppedAtHttpEquiv)
+        return;
     m_source.append(source);
 }
 
@@ -654,8 +661,10 @@ void HTMLPreloadScanner::scan(HTMLResourcePreloader& preloader, Document& docume
                     break;
                 }
             }
-            if (m_stoppedAtHttpEquiv)
+            if (m_stoppedAtHttpEquiv) {
+                m_source.clear();
                 break;
+            }
         }
         if (token->type() == HTMLToken::Type::StartTag)
             m_tokenizer.updateStateFor(AtomString::lookUp(token->name().span()));

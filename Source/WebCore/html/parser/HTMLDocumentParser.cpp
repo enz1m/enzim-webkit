@@ -397,6 +397,10 @@ void HTMLDocumentParser::insert(SegmentedString&& source)
     // but we need to ensure it isn't deleted yet.
     Ref<HTMLDocumentParser> protectedThis(*this);
 
+    // Stream scanning cannot preserve tokenizer context across document.write().
+    if (m_preloadScanner && m_preloadScanner->stopsAtHttpEquiv())
+        m_preloadScanner = nullptr;
+
     source.setExcludeLineNumbers();
     m_input.insertAtCurrentInsertionPoint(source);
     pumpTokenizerIfPossible(SynchronousMode::ForceSynchronous);
@@ -436,8 +440,9 @@ void HTMLDocumentParser::append(RefPtr<StringImpl>&& inputSource, SynchronousMod
     String source { WTF::move(inputSource) };
 
 #if PLATFORM(WPE)
+    static const bool streamPreload = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD")) != "0"_s;
     static const bool earlyHeadPreload = StringView::fromLatin1(std::getenv("WPE_EARLY_HEAD_PRELOAD")) != "0"_s;
-    if (earlyHeadPreload && m_options.scriptingFlag && synchronousMode == SynchronousMode::AllowYield
+    if (earlyHeadPreload && !streamPreload && m_options.scriptingFlag && synchronousMode == SynchronousMode::AllowYield
         && !isParsingFragment() && !inPumpSession() && !document()->documentElement()) {
         HTMLPreloadScanner headScanner(m_options, document()->url(), document()->deviceScaleFactor(), true);
         headScanner.appendToEnd(source.left(8192));
@@ -451,15 +456,30 @@ void HTMLDocumentParser::append(RefPtr<StringImpl>&& inputSource, SynchronousMod
     }
 #endif
 
+#if PLATFORM(WPE)
+    if (streamPreload && m_options.scriptingFlag && synchronousMode == SynchronousMode::AllowYield
+        && !isParsingFragment() && !inPumpSession() && !document()->documentElement() && !m_preloadScanner)
+        m_preloadScanner = makeUnique<HTMLPreloadScanner>(m_options, document()->url(), document()->deviceScaleFactor(), true);
+#endif
+
     if (m_preloadScanner) {
-        if (m_input.current().isEmpty() && !isWaitingForScripts()) {
+        if (source.length() > 4 * 1024 * 1024 && m_preloadScanner->stopsAtHttpEquiv())
+            m_preloadScanner = nullptr;
+    }
+    if (m_preloadScanner) {
+        if (!m_preloadScanner->stopsAtHttpEquiv() && m_input.current().isEmpty() && !isWaitingForScripts()) {
             // We have parsed until the end of the current input and so are now moving ahead of the preload scanner.
             // Clear the scanner so we know to scan starting from the current input point if we block again.
             m_preloadScanner = nullptr;
         } else {
             m_preloadScanner->appendToEnd(source);
-            if (isWaitingForScripts())
+            if (isWaitingForScripts() || m_preloadScanner->stopsAtHttpEquiv()) {
                 m_preloadScanner->scan(*m_preloader, *protect(document()));
+                static const bool trace = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD_TRACE")) == "1"_s;
+                static unsigned traces;
+                if (trace && m_preloadScanner->stopsAtHttpEquiv() && traces++ < 32)
+                    dataLogLn("WPE stream preload scanned bytes=", source.length());
+            }
         }
     }
 
@@ -472,7 +492,14 @@ void HTMLDocumentParser::append(RefPtr<StringImpl>&& inputSource, SynchronousMod
         return;
     }
 
-    pumpTokenizerIfPossible(synchronousMode);
+#if PLATFORM(WPE)
+    static const bool deferStreamParsing = StringView::fromLatin1(std::getenv("WPE_STREAM_PARSE_DEFER")) != "0"_s;
+    if (deferStreamParsing && synchronousMode == SynchronousMode::AllowYield && m_preloadScanner && m_preloadScanner->stopsAtHttpEquiv()) {
+        if (!isWaitingForScripts() && !isScheduledForResume())
+            Ref { *m_parserScheduler }->scheduleForResume();
+    } else
+#endif
+        pumpTokenizerIfPossible(synchronousMode);
 
     endIfDelayed();
 }
