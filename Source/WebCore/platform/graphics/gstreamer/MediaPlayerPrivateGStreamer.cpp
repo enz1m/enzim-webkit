@@ -218,6 +218,14 @@ MediaPlayerPrivateGStreamer::~MediaPlayerPrivateGStreamer()
     tearDown(true);
 }
 
+void MediaPlayerPrivateGStreamer::prepareToRebuildPipeline()
+{
+    if (!m_isPlayerShuttingDown.load())
+        return;
+    m_isPlayerShuttingDown.store(false);
+    m_sinkTaskQueue.finishAborting();
+}
+
 void MediaPlayerPrivateGStreamer::tearDown(bool clearMediaPlayer)
 {
     GST_DEBUG_OBJECT(pipeline(), "Disposing player");
@@ -1998,6 +2006,55 @@ void MediaPlayerPrivateGStreamer::handleStreamCollectionMessage(GstMessage* mess
         callOnMainThread(WTF::move(callback));
 }
 
+static bool isVADisplaySharingDisabled()
+{
+    static bool disabled = [] {
+        auto value = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_DISABLE_SHARED_VA_DISPLAY"));
+        return !value.isNull() && value != "0"_s;
+    }();
+    return disabled;
+}
+
+// Every pipeline of the process shares one VA display, as each display is a
+// driver instance with its own GPU memory. The display closes with its last user.
+static constexpr auto vaDisplayContextType = "gst.va.display.handle"_s;
+static Lock sharedVADisplayLock;
+static GWeakRef sharedVADisplay WTF_GUARDED_BY_LOCK(sharedVADisplayLock);
+static GType sharedVADisplayType WTF_GUARDED_BY_LOCK(sharedVADisplayLock);
+
+static void rememberVADisplay(GstMessage* message)
+{
+    GstContext* context;
+    gst_message_parse_have_context(message, &context);
+    GRefPtr adoptedContext = adoptGRef(context);
+    if (UTF8CStringView::unsafeFromUTF8(gst_context_get_context_type(context)) != vaDisplayContextType)
+        return;
+
+    const GValue* value = gst_structure_get_value(gst_context_get_structure(context), "gst-display");
+    if (!value || !G_VALUE_HOLDS_OBJECT(value) || !g_value_get_object(value))
+        return;
+
+    Locker locker { sharedVADisplayLock };
+    GRefPtr<GObject> current = adoptGRef(static_cast<GObject*>(g_weak_ref_get(&sharedVADisplay)));
+    if (current)
+        return;
+    g_weak_ref_set(&sharedVADisplay, g_value_get_object(value));
+    sharedVADisplayType = G_VALUE_TYPE(value);
+}
+
+static bool provideSharedVADisplay(GstMessage* message)
+{
+    Locker locker { sharedVADisplayLock };
+    GRefPtr<GObject> display = adoptGRef(static_cast<GObject*>(g_weak_ref_get(&sharedVADisplay)));
+    if (!display)
+        return false;
+
+    GRefPtr context = adoptGRef(gst_context_new(vaDisplayContextType.characters(), TRUE));
+    gst_structure_set(gst_context_writable_structure(context.get()), "gst-display", sharedVADisplayType, display.get(), nullptr);
+    gst_element_set_context(GST_ELEMENT(GST_MESSAGE_SRC(message)), context.get());
+    return true;
+}
+
 bool MediaPlayerPrivateGStreamer::handleNeedContextMessage(GstMessage* message)
 {
     ASSERT(GST_MESSAGE_TYPE(message) == GST_MESSAGE_NEED_CONTEXT);
@@ -2009,6 +2066,9 @@ bool MediaPlayerPrivateGStreamer::handleNeedContextMessage(GstMessage* message)
     auto contextType = UTF8CStringView::unsafeFromUTF8(contextTypeChars);
 
     GST_DEBUG_OBJECT(pipeline(), "Handling %s need-context message for %s", contextType.utf8(), GST_MESSAGE_SRC_NAME(message));
+
+    if (contextType == vaDisplayContextType && !isVADisplaySharingDisabled())
+        return provideSharedVADisplay(message);
 
     if (contextType == WEBKIT_WEB_SRC_RESOURCE_LOADER_CONTEXT_TYPE_NAME) {
         GRefPtr context = adoptGRef(gst_context_new(WEBKIT_WEB_SRC_RESOURCE_LOADER_CONTEXT_TYPE_NAME.characters(), FALSE));
@@ -2431,6 +2491,9 @@ void MediaPlayerPrivateGStreamer::handleMessage(GstMessage* message)
             playbin3SendSelectStreamsIfAppropriate();
         updateStates();
         checkPlayingConsistency();
+
+        if (currentState == GST_STATE_READY && newState == GST_STATE_PAUSED && isSuspended())
+            suspendAfterPreroll();
 
         break;
     }
@@ -3773,6 +3836,11 @@ void MediaPlayerPrivateGStreamer::createGSTPlayBin(const URL& url)
         player->handleNeedContextMessage(message);
     }), this);
 
+    if (!isVADisplaySharingDisabled())
+        g_signal_connect(bus.get(), "sync-message::have-context", G_CALLBACK(+[](GstBus*, GstMessage* message, gpointer) {
+            rememberVADisplay(message);
+        }), nullptr);
+
     g_signal_connect_swapped(bus.get(), "message::segment-done", G_CALLBACK(+[](MediaPlayerPrivateGStreamer* player, GstMessage*) {
         callOnMainThread([weakThis = ThreadSafeWeakPtr { *player }, player] {
             RefPtr self = weakThis.get();
@@ -4366,7 +4434,7 @@ void MediaPlayerPrivateGStreamer::setPageIsVisible(bool visible)
 
 void MediaPlayerPrivateGStreamer::managePlayerSuspend()
 {
-    if (!m_pipeline || isMediaStreamPlayer())
+    if ((!m_pipeline && !isSuspended()) || isMediaStreamPlayer())
         return;
 
     RefPtr player = m_player.get();
@@ -4393,6 +4461,12 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
         GstState actualState = pendingState != GST_STATE_VOID_PENDING ? pendingState : currentState;
         m_isSuspended = true;
         auto targetState = suspendTargetState();
+        if (!m_pageIsVisible && actualState >= GST_STATE_PAUSED && releasePipelineWhileSuspended(playbackPosition())) {
+            m_stateToResume = actualState;
+            GST_DEBUG("Page is hidden, released the pipeline until resumed to %s state", gst_state_get_name(actualState));
+            m_isPipelinePlaying = false;
+            return;
+        }
         // Suspending must never raise the state: an MSE pipeline still in GST_STATE_NULL has no URI yet,
         // so setting it to GST_STATE_PAUSED fails and breaks the later preroll.
         if (actualState <= targetState) {
@@ -4416,17 +4490,42 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
 #endif
     } else if (!shouldBeSuspended && isSuspended()) {
         m_isSuspended = false;
+        m_didSuspendAfterPreroll = false;
 
         if (m_stateToResume == GST_STATE_VOID_PENDING)
             return;
 
         GstState resumeState = GST_STATE_VOID_PENDING;
         std::swap(m_stateToResume, resumeState);
+        if (!m_pipeline) {
+            restorePipelineAfterSuspend(resumeState);
+            return;
+        }
         GST_DEBUG_OBJECT(pipeline(), "Element is either unmuted or in viewport again, resuming playback via state change to %s.",
             gst_state_get_name(resumeState));
         m_ongoingReturnFromSuspendedState = resumeState;
         changePipelineState(resumeState);
     }
+}
+
+void MediaPlayerPrivateGStreamer::suspendAfterPreroll()
+{
+    // A player suspended before its pipeline started still prerolls when it
+    // loads, which allocates the decoders that the suspension is meant to spare.
+    auto targetState = suspendTargetState();
+    if (targetState >= GST_STATE_PAUSED || m_didSuspendAfterPreroll)
+        return;
+
+    m_didSuspendAfterPreroll = true;
+    auto resumeState = std::max(m_stateToResume, GST_STATE_PAUSED);
+    m_positionToResume = playbackPosition();
+    GST_DEBUG_OBJECT(pipeline(), "Prerolled while suspended, setting pipeline state to %s. Will resume afterwards to %s state.", gst_state_get_name(targetState), gst_state_get_name(resumeState));
+    gst_element_set_state(m_pipeline.get(), targetState);
+    m_stateToResume = resumeState;
+    m_isPipelinePlaying = false;
+#if USE(GSTREAMER_GL)
+    flushCurrentBuffer();
+#endif
 }
 
 void MediaPlayerPrivateGStreamer::setPresentationSize(const IntSize& size)

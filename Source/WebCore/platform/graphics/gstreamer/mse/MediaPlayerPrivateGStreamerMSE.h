@@ -108,6 +108,7 @@ public:
     void mirrorEnabledVideoTrackIfNeeded(const VideoTrackPrivateGStreamer& originalVideoTrackPrivate) final;
 
     GstState suspendTargetState() const final { return GST_STATE_PAUSED; }
+    MediaTime currentTime() const final;
 
 private:
     explicit MediaPlayerPrivateGStreamerMSE(MediaPlayer&);
@@ -131,11 +132,16 @@ private:
 
     void propagateReadyStateToPlayer();
 
+    bool releasePipelineWhileSuspended(const MediaTime&) final;
+    void restorePipelineAfterSuspend(GstState) final;
+
     void emitStreams(const Vector<RefPtr<MediaSourceTrackGStreamer>>&);
 
     RefPtr<MediaSourcePrivateGStreamer> m_mediaSourcePrivate;
     MediaTime m_mediaTimeDuration { MediaTime::invalidTime() };
     Vector<RefPtr<MediaSourceTrackGStreamer>> m_tracks;
+    // Where a pipeline released while suspended resumes once rebuilt.
+    MediaTime m_positionAfterRebuild { MediaTime::invalidTime() };
 
     bool m_isWaitingForPreroll = true;
     MediaPlayer::ReadyState m_mediaSourceReadyState = MediaPlayer::ReadyState::HaveNothing;

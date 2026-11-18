@@ -364,6 +364,8 @@ protected:
 
     virtual void didEnd();
     void tearDown(bool clearMediaPlayer);
+    // Undoes what tearDown(false) stops so that the pipeline can be built again.
+    void prepareToRebuildPipeline();
 
     URL m_url;
     const Ref<MainThreadNotifier<MainThreadNotification>> m_notifier;
@@ -521,6 +523,11 @@ private:
 
     void managePlayerSuspend();
     virtual GstState suspendTargetState() const { return GST_STATE_NULL; }
+    // A player that can rebuild its pipeline may tear it down while its page is
+    // hidden, which frees the decoders that a paused pipeline keeps.
+    virtual bool releasePipelineWhileSuspended(const MediaTime&) { return false; }
+    virtual void restorePipelineAfterSuspend(GstState) { }
+    void suspendAfterPreroll();
 
     void createGSTPlayBin(const URL&);
 
@@ -682,6 +689,7 @@ private:
     bool m_didTryToRecoverPlayingState { false };
 
     bool m_isSuspended { false };
+    bool m_didSuspendAfterPreroll { false };
     // The state the pipeline should be set back to after the player is resumed.
     GstState m_stateToResume { GST_STATE_VOID_PENDING };
     MediaTime m_positionToResume { MediaTime::invalidTime() };

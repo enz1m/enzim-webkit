@@ -236,8 +236,10 @@ MediaTime MediaPlayerPrivateGStreamerMSE::duration() const
 Ref<MediaTimePromise> MediaPlayerPrivateGStreamerMSE::seekToTarget(const SeekTarget& target)
 {
     m_seekPromise.emplace(PlatformMediaError::Cancelled);
-    if (!m_pipeline)
+    if (!m_pipeline) {
+        m_positionAfterRebuild = MediaTime::invalidTime();
         rebuildPipeline();
+    }
 
     GST_INFO_OBJECT(pipeline(), "Requested seek to %s", target.time.toString().utf8());
     if (!doSeek(target, m_playbackRate))
@@ -600,8 +602,43 @@ void MediaPlayerPrivateGStreamerMSE::rebuildPipeline()
 
     GST_DEBUG("Re-building the pipeline");
     m_isEndReached = false;
+    prepareToRebuildPipeline();
     MediaPlayerPrivateGStreamer::load(m_url.string());
     changePipelineState(GST_STATE_PAUSED);
+
+    // The samples are enqueued again by a seek to where the released pipeline stopped.
+    auto position = std::exchange(m_positionAfterRebuild, MediaTime::invalidTime());
+    if (position.isValid() && m_source)
+        doSeek(SeekTarget { position }, m_playbackRate);
+}
+
+MediaTime MediaPlayerPrivateGStreamerMSE::currentTime() const
+{
+    if (!pipeline() && m_positionAfterRebuild.isValid())
+        return m_positionAfterRebuild;
+    return MediaPlayerPrivateGStreamer::currentTime();
+}
+
+bool MediaPlayerPrivateGStreamerMSE::releasePipelineWhileSuspended(const MediaTime& position)
+{
+    // As at the end of the stream, the pipeline is rebuilt from the source buffers' samples.
+    if (m_isSeeking || !m_mediaSourcePrivate || !m_mediaSourcePrivate->hasAllTracks())
+        return false;
+
+    m_positionAfterRebuild = position;
+#if USE(GSTREAMER_GL)
+    // Keep a copy of the last frame to show; the original pins the decoder's surface pool.
+    flushCurrentBuffer();
+#endif
+    tearDown(false);
+    return true;
+}
+
+void MediaPlayerPrivateGStreamerMSE::restorePipelineAfterSuspend(GstState resumeState)
+{
+    rebuildPipeline();
+    if (resumeState == GST_STATE_PLAYING)
+        updateStates();
 }
 
 void MediaPlayerPrivateGStreamerMSE::getSupportedTypes(HashSet<String>& types)
