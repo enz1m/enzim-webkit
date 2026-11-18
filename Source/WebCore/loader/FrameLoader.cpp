@@ -1180,6 +1180,18 @@ void FrameLoader::startCheckCompleteTimer()
         return;
     if (m_checkTimer.isActive())
         return;
+#if PLATFORM(WPE)
+    // As for Document::decrementLoadEventDelayCount(): a frame whose last child or pending
+    // update just finished completes ahead of timers that are already due.
+    static const bool beforeDueTimers = [] {
+        const char* value = getenv("WPE_LOAD_EVENT_BEFORE_DUE_TIMERS");
+        return !value || *value != '0';
+    }();
+    if (beforeDueTimers) {
+        m_checkTimer.startOneShotBeforeDueTimers();
+        return;
+    }
+#endif
     m_checkTimer.startOneShot(0_s);
 }
 

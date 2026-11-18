@@ -9677,8 +9677,22 @@ void Document::decrementLoadEventDelayCount()
     ASSERT(m_loadEventDelayCount);
     --m_loadEventDelayCount;
 
-    if (frame() && !m_loadEventDelayCount && !m_loadEventDelayTimer.isActive())
+    if (frame() && !m_loadEventDelayCount && !m_loadEventDelayTimer.isActive()) {
+#if PLATFORM(WPE)
+        // Timers that came due while the last delaying script ran would otherwise fire
+        // first, and what they fetch holds back a load event that was already unblocked.
+        // Blink and Gecko complete the load before such timers.
+        static const bool beforeDueTimers = [] {
+            const char* value = getenv("WPE_LOAD_EVENT_BEFORE_DUE_TIMERS");
+            return !value || *value != '0';
+        }();
+        if (beforeDueTimers) {
+            m_loadEventDelayTimer.startOneShotBeforeDueTimers();
+            return;
+        }
+#endif
         m_loadEventDelayTimer.startOneShot(0_s);
+    }
 }
 
 void Document::loadEventDelayTimerFired()
