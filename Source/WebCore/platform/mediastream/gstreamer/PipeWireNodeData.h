@@ -43,6 +43,8 @@ struct PipeWireNodeData {
     GRefPtr<GstCaps> caps;
     String path;
     String label;
+    // Whether the person picked a window rather than a monitor in the portal.
+    bool isWindow { false };
 };
 
 } // namespace WebCore

@@ -192,11 +192,19 @@ void GStreamerVideoCaptureSource::sourceCapsChanged(const GstCaps* caps)
 {
     GST_DEBUG("Caps changed to %" GST_PTR_FORMAT, caps);
     auto videoResolution = getVideoResolutionFromCaps(caps);
+    if (!videoResolution && gst_caps_get_size(caps)) {
+        // DMABuf caps with a DRM format, as a shared window's, do not parse
+        // as raw video; their structure still names the size.
+        int width, height;
+        auto* structure = gst_caps_get_structure(caps, 0);
+        if (gst_structure_get_int(structure, "width", &width) && gst_structure_get_int(structure, "height", &height))
+            videoResolution = FloatSize(width, height);
+    }
     if (!videoResolution)
         return;
 
     setIntrinsicSize(IntSize(*videoResolution), false);
-    if (m_deviceType == CaptureDevice::DeviceType::Screen)
+    if (m_deviceType == CaptureDevice::DeviceType::Screen || m_deviceType == CaptureDevice::DeviceType::Window)
         ensureIntrinsicSizeMaintainsAspectRatio();
 }
 
@@ -264,26 +272,39 @@ const RealtimeMediaSourceCapabilities& GStreamerVideoCaptureSource::capabilities
 
 const RealtimeMediaSourceSettings& GStreamerVideoCaptureSource::settings()
 {
+    bool isDisplay = m_deviceType == CaptureDevice::DeviceType::Screen || m_deviceType == CaptureDevice::DeviceType::Window;
     if (!m_currentSettings) {
         RealtimeMediaSourceSettings settings;
         settings.setDeviceId(hashedId());
 
         RealtimeMediaSourceSupportedConstraints supportedConstraints;
         supportedConstraints.setSupportsDeviceId(true);
-        supportedConstraints.setSupportsFacingMode(true);
         supportedConstraints.setSupportsWidth(true);
         supportedConstraints.setSupportsHeight(true);
         supportedConstraints.setSupportsAspectRatio(true);
         supportedConstraints.setSupportsFrameRate(true);
+        if (isDisplay) {
+            supportedConstraints.setSupportsDisplaySurface(true);
+            supportedConstraints.setSupportsLogicalSurface(true);
+            settings.setDisplaySurface(m_deviceType == CaptureDevice::DeviceType::Window ? DisplaySurfaceType::Window : DisplaySurfaceType::Monitor);
+            settings.setLogicalSurface(false);
+        } else
+            supportedConstraints.setSupportsFacingMode(true);
         settings.setSupportedConstraints(supportedConstraints);
 
         m_currentSettings = WTF::move(settings);
     }
 
-    m_currentSettings->setWidth(size().width());
-    m_currentSettings->setHeight(size().height());
+    // A display source has no size until a page constrains one; it then
+    // reports the size the stream negotiated.
+    auto currentSize = size();
+    if (currentSize.isEmpty() && isDisplay)
+        currentSize = intrinsicSize();
+    m_currentSettings->setWidth(currentSize.width());
+    m_currentSettings->setHeight(currentSize.height());
     m_currentSettings->setFrameRate(frameRate());
-    m_currentSettings->setFacingMode(facingMode());
+    if (!isDisplay)
+        m_currentSettings->setFacingMode(facingMode());
     return m_currentSettings.value();
 }
 

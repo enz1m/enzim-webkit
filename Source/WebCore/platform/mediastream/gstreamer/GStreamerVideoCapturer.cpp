@@ -67,6 +67,13 @@ void GStreamerVideoCapturer::handleSample(GRefPtr<GstSample>&& sample)
 
     auto rotationFromMeta = webkitGstBufferGetVideoRotation(buffer);
     auto size = this->size();
+    // A display capturer has no size until a page constrains one. Its frames
+    // then take the negotiated size: a frame without one is dropped by every
+    // consumer that scales it, such as a WebRTC sender.
+    if (size.isEmpty()) {
+        if (auto resolution = getVideoResolutionFromCaps(gst_sample_get_caps(sample.get())))
+            size = roundedIntSize(*resolution);
+    }
     VideoFrameGStreamer::CreateOptions options(WTF::move(size));
     options.presentationTime = presentationTime;
     options.rotation = rotationFromMeta.first;

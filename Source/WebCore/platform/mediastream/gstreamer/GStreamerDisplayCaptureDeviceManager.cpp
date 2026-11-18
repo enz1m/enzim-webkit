@@ -62,7 +62,7 @@ CaptureSourceOrError GStreamerDisplayCaptureDeviceManager::createDisplayCaptureS
     const auto it = m_sessions.find(device.persistentId());
     if (it != m_sessions.end()) {
         auto& node = it->value;
-        PipeWireCaptureDevice pipewireCaptureDevice { *node, device.persistentId(), device.type(), device.label(), device.groupId() };
+        PipeWireCaptureDevice pipewireCaptureDevice { *node, device.persistentId(), node->isWindow ? CaptureDevice::DeviceType::Window : device.type(), device.label(), device.groupId() };
         return GStreamerVideoCaptureSource::createPipewireSource(WTF::move(pipewireCaptureDevice), WTF::move(hashSalts), constraints);
     }
 
@@ -104,9 +104,10 @@ CaptureSourceOrError GStreamerDisplayCaptureDeviceManager::createDisplayCaptureS
         return CaptureSourceOrError({ { }, MediaAccessDenialReason::PermissionDenied });
 
     std::optional<uint32_t> nodeId;
+    auto deviceType = device.type();
     g_variant_get(result.get(), "(o)", &objectPathChars.outPtr());
     objectPath = GMallocString::unsafeAdoptFromUTF8(WTF::move(objectPathChars));
-    m_portal->waitResponseSignal(toUTF8CStringView(objectPath), [&nodeId](GVariant* parameters) mutable {
+    m_portal->waitResponseSignal(toUTF8CStringView(objectPath), [&nodeId, &deviceType](GVariant* parameters) mutable {
         uint32_t portalResponse;
         GRefPtr<GVariant> responseData;
         g_variant_get(parameters, "(u@a{sv})", &portalResponse, &responseData.outPtr());
@@ -129,6 +130,10 @@ CaptureSourceOrError GStreamerDisplayCaptureDeviceManager::createDisplayCaptureS
             GRefPtr<GVariant> options;
             g_variant_get(variant.get(), "(u@a{sv})", &streamId, &options.outPtr());
             nodeId = streamId;
+            // The person picks a monitor or a window in the portal; report what they picked.
+            uint32_t sourceType;
+            if (g_variant_lookup(options.get(), "source_type", "u", &sourceType))
+                deviceType = sourceType == static_cast<uint32_t>(PipeWireOutputType::Window) ? CaptureDevice::DeviceType::Window : CaptureDevice::DeviceType::Screen;
         }
     });
 
@@ -142,7 +147,8 @@ CaptureSourceOrError GStreamerDisplayCaptureDeviceManager::createDisplayCaptureS
         return CaptureSourceOrError({ { }, MediaAccessDenialReason::PermissionDenied });
 
     nodeData->objectId = *nodeId;
-    PipeWireCaptureDevice pipewireCaptureDevice { *nodeData, device.persistentId(), device.type(), device.label(), device.groupId() };
+    nodeData->isWindow = deviceType == CaptureDevice::DeviceType::Window;
+    PipeWireCaptureDevice pipewireCaptureDevice { *nodeData, device.persistentId(), deviceType, device.label(), device.groupId() };
     m_sessions.add(device.persistentId(), makeUnique<PipeWireNodeData>(WTF::move(*nodeData)));
     return GStreamerVideoCaptureSource::createPipewireSource(WTF::move(pipewireCaptureDevice), WTF::move(hashSalts), constraints);
 }
