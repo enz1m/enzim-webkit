@@ -95,9 +95,16 @@ void ClassChangeInvalidation::computeInvalidation(const SpaceSplitString& oldCla
     bool shouldInvalidateCurrent = false;
     bool mayAffectStyleInShadowTree = false;
 
+    // Only the element's own scope is traversed with mayAffectShadowTree set. Its user style keeps
+    // its class rules out of the merged features, see ScopeRuleSets::collectFeatures().
+    auto userStyleHasClassRules = [&](AtomStringImpl* className) {
+        RefPtr userStyle = m_element->styleResolver().ruleSets().userStyle();
+        return userStyle && userStyle->features().classRules.contains(className);
+    };
+
     traverseRuleFeatures(m_element, [&] (const RuleFeatureSet& features, bool mayAffectShadowTree) {
         for (auto& classChange : classChanges) {
-            if (mayAffectShadowTree && features.classRules.contains(classChange.className))
+            if (mayAffectShadowTree && (features.classRules.contains(classChange.className) || userStyleHasClassRules(classChange.className)))
                 mayAffectStyleInShadowTree = true;
             if (features.classesAffectingHost.contains(classChange.className))
                 shouldInvalidateCurrent = true;

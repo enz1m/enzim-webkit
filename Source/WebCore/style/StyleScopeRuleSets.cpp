@@ -264,6 +264,67 @@ void ScopeRuleSets::appendAuthorStyleSheets(std::span<const Ref<CSSStyleSheet>> 
     collectFeatures();
 }
 
+#if PLATFORM(WPE)
+// A content blocker's user style has thousands of rules that each name one class or id. Copying
+// their id and class rule tables into the merged features costs an allocation per name, for every
+// scope that shares the user style and again whenever an author sheet is appended. Those two
+// tables therefore stay in the user style, and idInvalidationRuleSets(), classInvalidationRuleSets()
+// and ClassChangeInvalidation read them there. WPE_LAYERED_USER_STYLE_FEATURES=0 restores the copy.
+static bool layeredUserStyleFeatures()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("WPE_LAYERED_USER_STYLE_FEATURES");
+        return !value || *value != '0';
+    }();
+    return enabled;
+}
+
+// Everything RuleFeatureSet::add() merges, except idRules and classRules.
+static void addExceptIdAndClassRules(RuleFeatureSet& features, const RuleFeatureSet& other)
+{
+    features.idsInRules.addAll(other.idsInRules);
+    features.idsMatchingAncestorsInRules.addAll(other.idsMatchingAncestorsInRules);
+    features.attributeLowercaseLocalNamesInRules.addAll(other.attributeLowercaseLocalNamesInRules);
+    features.attributeLocalNamesInRules.addAll(other.attributeLocalNamesInRules);
+
+    auto addMap = [&](auto& map, auto& otherMap) {
+        for (auto& keyValuePair : otherMap) {
+            map.ensure(keyValuePair.key, [] {
+                return makeUnique<std::decay_t<decltype(*keyValuePair.value)>>();
+            }).iterator->value->appendVector(*keyValuePair.value);
+        }
+    };
+
+    features.classesAffectingHost.addAll(other.classesAffectingHost);
+
+    addMap(features.attributeRules, other.attributeRules);
+    features.attributesAffectingHost.addAll(other.attributesAffectingHost);
+
+    addMap(features.pseudoClassRules, other.pseudoClassRules);
+    features.pseudoClassesAffectingHost.addAll(other.pseudoClassesAffectingHost);
+    features.pseudoClasses.addAll(other.pseudoClasses);
+
+    addMap(features.hasPseudoClassRules, other.hasPseudoClassRules);
+
+    for (size_t i = 0; i < features.usedRelations.size(); ++i)
+        features.usedRelations[i] = features.usedRelations[i] || other.usedRelations[i];
+
+    features.usesFirstLineRules = features.usesFirstLineRules || other.usesFirstLineRules;
+    features.usesFirstLetterRules = features.usesFirstLetterRules || other.usesFirstLetterRules;
+    features.hasStartingStyleRules = features.hasStartingStyleRules || other.hasStartingStyleRules;
+    features.usesHasPseudoClass = features.usesHasPseudoClass || other.usesHasPseudoClass;
+}
+
+// The user style features whose id and class rules are not part of the merged features.
+static const RuleFeatureSet* layeredUserFeatures(const ScopeRuleSets& ruleSets)
+{
+    if (!layeredUserStyleFeatures())
+        return nullptr;
+    auto* userStyle = ruleSets.userStyle();
+    return userStyle ? &userStyle->features() : nullptr;
+}
+#endif
+
 void ScopeRuleSets::collectFeatures() const
 {
     RELEASE_ASSERT(isMainThread());
@@ -279,8 +340,14 @@ void ScopeRuleSets::collectFeatures() const
 
     if (m_authorStyle)
         m_features.add(m_authorStyle->features());
-    if (RefPtr userStyle = this->userStyle())
-        m_features.add(userStyle->features());
+    if (RefPtr userStyle = this->userStyle()) {
+#if PLATFORM(WPE)
+        if (layeredUserStyleFeatures())
+            addExceptIdAndClassRules(m_features, userStyle->features());
+        else
+#endif
+            m_features.add(userStyle->features());
+    }
 
     m_idInvalidationRuleSets.clear();
     m_classInvalidationRuleSets.clear();
@@ -403,25 +470,43 @@ static Vector<InvalidationRuleSet> buildInvalidationRuleSets(const RuleFeatureVe
     });
 }
 
+// moreRuleFeatures holds rule features that were left out of ruleFeatures; they follow it, as they
+// would if both had been merged.
 template<typename KeyType, typename Hash, typename HashTraits>
-static Vector<InvalidationRuleSet>* ensureInvalidationRuleSets(const KeyType& key, HashMap<KeyType, std::unique_ptr<Vector<InvalidationRuleSet>>, Hash, HashTraits>& ruleSetMap, const HashMap<KeyType, std::unique_ptr<RuleFeatureVector>, Hash, HashTraits>& ruleFeatures)
+static Vector<InvalidationRuleSet>* ensureInvalidationRuleSets(const KeyType& key, HashMap<KeyType, std::unique_ptr<Vector<InvalidationRuleSet>>, Hash, HashTraits>& ruleSetMap, const HashMap<KeyType, std::unique_ptr<RuleFeatureVector>, Hash, HashTraits>& ruleFeatures, const HashMap<KeyType, std::unique_ptr<RuleFeatureVector>, Hash, HashTraits>* moreRuleFeatures = nullptr)
 {
     return ruleSetMap.ensure(key, [&] () -> std::unique_ptr<Vector<InvalidationRuleSet>> {
         auto* features = ruleFeatures.get(key);
-        if (!features)
+        auto* moreFeatures = moreRuleFeatures ? moreRuleFeatures->get(key) : nullptr;
+        if (!features && !moreFeatures)
             return nullptr;
+        if (!moreFeatures)
+            return makeUnique<Vector<InvalidationRuleSet>>(buildInvalidationRuleSets(*features));
+        if (!features)
+            return makeUnique<Vector<InvalidationRuleSet>>(buildInvalidationRuleSets(*moreFeatures));
 
-        return makeUnique<Vector<InvalidationRuleSet>>(buildInvalidationRuleSets(*features));
+        RuleFeatureVector allFeatures;
+        allFeatures.appendVector(*features);
+        allFeatures.appendVector(*moreFeatures);
+        return makeUnique<Vector<InvalidationRuleSet>>(buildInvalidationRuleSets(allFeatures));
     }).iterator->value.get();
 }
 
 const Vector<InvalidationRuleSet>* ScopeRuleSets::idInvalidationRuleSets(const AtomString& id) const
 {
+#if PLATFORM(WPE)
+    if (auto* userFeatures = layeredUserFeatures(*this))
+        return ensureInvalidationRuleSets(id, m_idInvalidationRuleSets, m_features.idRules, &userFeatures->idRules);
+#endif
     return ensureInvalidationRuleSets(id, m_idInvalidationRuleSets, m_features.idRules);
 }
 
 const Vector<InvalidationRuleSet>* ScopeRuleSets::classInvalidationRuleSets(const AtomString& className) const
 {
+#if PLATFORM(WPE)
+    if (auto* userFeatures = layeredUserFeatures(*this))
+        return ensureInvalidationRuleSets(className, m_classInvalidationRuleSets, m_features.classRules, &userFeatures->classRules);
+#endif
     return ensureInvalidationRuleSets(className, m_classInvalidationRuleSets, m_features.classRules);
 }
 
