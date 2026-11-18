@@ -25,6 +25,9 @@
 
 #include "config.h"
 #include "WebPlatformStrategies.h"
+#if PLATFORM(WPE)
+#include "WPECopyCapture.h"
+#endif
 
 #include "BlobRegistryProxy.h"
 #include "HangDetectionDisabler.h"
@@ -70,6 +73,31 @@
 #endif
 
 namespace WebKit {
+
+#if PLATFORM(WPE)
+static thread_local WPECopyCapture* s_copyCapture;
+WPECopyCaptureScope::WPECopyCaptureScope(WPECopyCapture& capture)
+    : m_previous(std::exchange(s_copyCapture, &capture))
+{
+}
+WPECopyCaptureScope::~WPECopyCaptureScope()
+{
+    s_copyCapture = m_previous;
+}
+bool WPECopyCaptureScope::isActive()
+{
+    return s_copyCapture;
+}
+void captureWPECopyText(const String& text)
+{
+    if (!s_copyCapture)
+        return;
+    constexpr size_t maximumBytes = 4 * 1024 * 1024;
+    s_copyCapture->tooLarge = text.length() > maximumBytes || text.utf8().length() > maximumBytes;
+    s_copyCapture->wrote = !text.isEmpty() && !text.contains(u'\0');
+    s_copyCapture->text = s_copyCapture->tooLarge || !s_copyCapture->wrote ? String { } : text;
+}
+#endif
 using namespace WebCore;
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(WebPlatformStrategies);
@@ -418,6 +446,9 @@ RefPtr<SharedBuffer> WebPlatformStrategies::readBufferFromClipboard(const String
 
 void WebPlatformStrategies::writeToClipboard(const String& pasteboardName, SelectionData&& selectionData)
 {
+#if PLATFORM(WPE)
+    captureWPECopyText(selectionData.hasText() ? selectionData.text() : String { });
+#endif
     WebProcess::singleton().parentProcessConnection()->send(Messages::WebPasteboardProxy::WriteToClipboard(pasteboardName, WTF::move(selectionData)), 0);
 }
 
@@ -468,6 +499,10 @@ Vector<String> WebPlatformStrategies::typesSafeForDOMToReadAndWrite(const String
 
 int64_t WebPlatformStrategies::writeCustomData(const Vector<PasteboardCustomData>& data, const String& pasteboardName, const PasteboardContext* context)
 {
+#if PLATFORM(WPE)
+    if (WPECopyCaptureScope::isActive())
+        captureWPECopyText(data.size() == 1 ? data[0].readString("text/plain"_s) : String { });
+#endif
     auto sendResult = protect(WebProcess::singleton().parentProcessConnection())->sendSync(Messages::WebPasteboardProxy::WriteCustomData(data, pasteboardName, pageIdentifier(context)), 0);
     auto [newChangeCount] = sendResult.takeReplyOr(0);
     return newChangeCount;

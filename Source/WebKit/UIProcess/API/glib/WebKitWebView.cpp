@@ -4526,11 +4526,11 @@ enum class RunJavascriptReturnType {
 #endif
 };
 
-static void webkitWebViewRunJavaScriptWithParams(WebKitWebView* webView, WebKit::RunJavaScriptParameters&& params, const char* worldName, RunJavascriptReturnType returnType, GRefPtr<GTask>&& task)
+static void webkitWebViewRunJavaScriptWithParams(WebKitWebView* webView, WebKit::RunJavaScriptParameters&& params, const char* worldName, RunJavascriptReturnType returnType, GRefPtr<GTask>&& task, std::optional<WebCore::FrameIdentifier> targetFrame = std::nullopt)
 {
     auto world = worldName ? API::ContentWorld::sharedWorldWithName(String::fromUTF8(worldName)) : Ref<API::ContentWorld> { API::ContentWorld::pageContentWorldSingleton() };
     constexpr bool wantsResult = true;
-    getPage(webView).runJavaScriptInFrameInScriptWorld(WTF::move(params), std::nullopt, world.get(), wantsResult, [task = WTF::move(task), returnType] (auto&& result) {
+    getPage(webView).runJavaScriptInFrameInScriptWorld(WTF::move(params), targetFrame, world.get(), wantsResult, [task = WTF::move(task), returnType] (auto&& result) {
         if (g_task_return_error_if_cancelled(task.get()))
             return;
 
@@ -6620,5 +6620,28 @@ gboolean webkit_web_view_enzui_revoke_geolocation_finish(WebKitWebView* webView,
     g_return_val_if_fail(g_task_is_valid(result, webView), FALSE);
     g_return_val_if_fail(g_async_result_is_tagged(result, reinterpret_cast<gpointer>(webkit_web_view_enzui_revoke_geolocation)), FALSE);
     return g_task_propagate_boolean(G_TASK(result), error);
+}
+#endif
+
+#if PLATFORM(WPE)
+extern "C" WEBKIT_API void webkit_web_view_enzui_copy_selection(WebKitWebView* webView, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    auto task = adoptGRef(g_task_new(webView, cancellable, callback, userData));
+    auto* frame = getPage(webView).focusedOrMainFrame();
+    auto source = IPC::TransferString::create(String { "__enzui_native_copy_v1__"_s });
+    if (!frame || !source) {
+        g_task_return_new_error(task.get(), G_IO_ERROR, G_IO_ERROR_FAILED, "ENZUI_COPY_INVALID_TARGET");
+        return;
+    }
+    WebKit::RunJavaScriptParameters params {
+        WTF::move(*source), JSC::SourceTaintedOrigin::Untainted, URL { },
+        RunAsAsyncFunction::No, std::nullopt, ForceUserGesture::Yes, RemoveTransientActivation::Yes
+    };
+    webkitWebViewRunJavaScriptWithParams(webView, WTF::move(params), "enzui-native-copy-command-v1", RunJavascriptReturnType::JSCValue, WTF::move(task), frame->frameID());
+}
+extern "C" WEBKIT_API JSCValue* webkit_web_view_enzui_copy_selection_finish(WebKitWebView* webView, GAsyncResult* result, GError** error)
+{
+    return webkit_web_view_evaluate_javascript_finish(webView, result, error);
 }
 #endif

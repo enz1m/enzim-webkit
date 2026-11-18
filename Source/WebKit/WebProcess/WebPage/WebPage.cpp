@@ -27,6 +27,9 @@
 
 #include "config.h"
 #include "WebPage.h"
+#if PLATFORM(WPE)
+#include "WPECopyCapture.h"
+#endif
 
 #include "APIArray.h"
 #include "APIGeometry.h"
@@ -5411,6 +5414,34 @@ void WebPage::runJavaScriptInFrameInScriptWorld(RunJavaScriptParameters&& parame
 {
     WEBPAGE_RELEASE_LOG(Process, "runJavaScriptInFrameInScriptWorld: frameID=%" PRIu64, frameID ? frameID->toUInt64() : 0);
     RefPtr webFrame = frameID ? WebProcess::singleton().webFrame(*frameID) : &mainWebFrame();
+
+#if PLATFORM(WPE)
+    // Only the host's private native-copy entry point selects this isolated world.
+    if (worldData.name == "enzui-native-copy-command-v1"_s) {
+        auto source = WTF::move(parameters.source).release();
+        RefPtr frame = webFrame ? webFrame->coreLocalFrame() : nullptr;
+        if (!source || *source != "__enzui_native_copy_v1__"_s || !frame
+            || parameters.forceUserGesture != ForceUserGesture::Yes) {
+            completionHandler(makeUnexpected(ExceptionDetails { "ENZUI_COPY_INVALID_TARGET"_s }));
+            return;
+        }
+        WPECopyCapture capture;
+        {
+            WPECopyCaptureScope scope(capture);
+            UserGestureIndicator gesture { IsProcessingUserGesture::Yes, frame->document() };
+            protect(frame->editor())->command("Copy"_s).execute({ });
+        }
+        if (capture.tooLarge || !capture.wrote) {
+            completionHandler(makeUnexpected(ExceptionDetails { capture.tooLarge ? "ENZUI_COPY_TEXT_TOO_LARGE"_s : "ENZUI_COPY_NO_TEXT"_s }));
+            return;
+        }
+        auto root = JSObjectID::generate();
+        JavaScriptEvaluationResult::Map values;
+        values.add(root, WTF::move(capture.text));
+        completionHandler(JavaScriptEvaluationResult { root, WTF::move(values) });
+        return;
+    }
+#endif
 
     m_userContentController->addContentWorldIfNecessary(worldData);
 
