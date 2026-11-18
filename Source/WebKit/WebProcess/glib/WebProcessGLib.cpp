@@ -50,6 +50,8 @@
 
 #include <WebCore/ApplicationGLib.h>
 #include <WebCore/MemoryCache.h>
+#include <WebCore/Page.h>
+#include <WebCore/Settings.h>
 #include <wtf/SetForScope.h>
 
 #if USE(WPE_RENDERER)
@@ -341,6 +343,16 @@ std::optional<AvailableInputDevices> WebProcess::primaryPointingDevice() const
 void WebProcess::setAvailableInputDevices(OptionSet<AvailableInputDevices> availableInputDevices)
 {
     m_availableInputDevices = availableInputDevices;
+#if PLATFORM(WPE) && ENABLE(WPE_PLATFORM)
+    for (auto& page : m_pageMap.values()) {
+        if (RefPtr corePage = page->corePage()) {
+#if ENABLE(TOUCH_EVENTS)
+            corePage->settings().setTouchEventDOMAttributesEnabled(availableInputDevices.contains(AvailableInputDevices::Touchscreen));
+#endif
+            corePage->updateStyleAfterChangeInEnvironment();
+        }
+    }
+#endif
 }
 #endif // PLATFORM(GTK) || PLATFORM(WPE)
 

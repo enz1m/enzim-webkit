@@ -73,6 +73,11 @@ using namespace WebCore;
 
 void WebPage::platformInitialize(const WebPageCreationParameters&)
 {
+#if PLATFORM(WPE) && ENABLE(WPE_PLATFORM) && ENABLE(TOUCH_EVENTS)
+    if (RefPtr page = corePage())
+        page->settings().setTouchEventDOMAttributesEnabled(WebProcess::singleton().availableInputDevices().contains(AvailableInputDevices::Touchscreen));
+#endif
+
 #if USE(ATSPI)
     // Create the accessible object (the plug) that will serve as the
     // entry point to the Web process, and send a message to the UI
