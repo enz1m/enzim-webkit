@@ -565,11 +565,11 @@ class SkFontMgr_fontconfig : public SkFontMgr {
                 for (int id = 0; ; ++id) {
                     FcChar8* fcFamilyName;
                     FcResult result = FcPatternGetString(current, FC_FAMILY, id, &fcFamilyName);
-                    if (FcResultNoId == result) {
-                        break;
+                    if (FcResultTypeMismatch == result) {
+                        continue;
                     }
                     if (FcResultMatch != result) {
-                        continue;
+                        break;
                     }
                     const char* familyName = reinterpret_cast<const char*>(fcFamilyName);
                     if (familyName && !FindName(names, familyName)) {
@@ -764,11 +764,11 @@ protected:
         FcCharSet* matchCharSet;
         for (int charSetId = 0; ; ++charSetId) {
             result = FcPatternGetCharSet(font, FC_CHARSET, charSetId, &matchCharSet);
-            if (FcResultNoId == result) {
-                break;
+            if (FcResultTypeMismatch == result) {
+                continue;
             }
             if (FcResultMatch != result) {
-                continue;
+                break;
             }
             if (FcCharSetHasChar(matchCharSet, character)) {
                 return true;
