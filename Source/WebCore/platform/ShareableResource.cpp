@@ -28,10 +28,62 @@
 
 #if ENABLE(SHAREABLE_RESOURCE)
 
+#include "MemoryRelease.h"
 #include "SharedBuffer.h"
 #include <wtf/CheckedArithmetic.h>
+#include <wtf/HashSet.h>
+#include <wtf/Lock.h>
+#include <wtf/NeverDestroyed.h>
+#include <wtf/PageBlock.h>
+
+#if OS(LINUX)
+#include <sys/mman.h>
+#endif
 
 namespace WebCore {
+
+// Every resource of this process, for releaseResidentPagesOfMappedResources().
+static Lock allResourcesLock;
+static HashSet<ShareableResource*>& allResources() WTF_REQUIRES_LOCK(allResourcesLock)
+{
+    static NeverDestroyed<HashSet<ShareableResource*>> resources;
+    return resources;
+}
+
+// A resource received from the network process is a shared mapping of its file in the disk cache.
+// Its pages stay in the page cache without being resident here, and reading one again costs a
+// minor fault. The range is widened to whole pages, which belong to the same mapping.
+static void releaseResidentPages(const ShareableResource& resource)
+{
+#if OS(LINUX)
+    auto bytes = resource.span();
+    auto begin = roundDownToMultipleOf(WTF::pageSize(), reinterpret_cast<uintptr_t>(bytes.data()));
+    auto end = roundUpToMultipleOf(WTF::pageSize(), reinterpret_cast<uintptr_t>(bytes.data()) + bytes.size());
+    if (begin < end)
+        madvise(reinterpret_cast<void*>(begin), end - begin, MADV_DONTNEED);
+#else
+    UNUSED_PARAM(resource);
+#endif
+}
+
+void releaseResidentPagesOfMappedResources()
+{
+    Locker locker { allResourcesLock };
+    for (auto* resource : allResources())
+        releaseResidentPages(*resource);
+}
+
+bool releaseResidentPagesIfMappedResource(std::span<const uint8_t> bytes)
+{
+    Locker locker { allResourcesLock };
+    for (auto* resource : allResources()) {
+        if (resource->span().data() != bytes.data())
+            continue;
+        releaseResidentPages(*resource);
+        return true;
+    }
+    return false;
+}
 
 ShareableResourceHandle::ShareableResourceHandle(SharedMemory::Handle&& handle, unsigned offset, unsigned size)
     : m_handle(WTF::move(handle))
@@ -86,9 +138,15 @@ ShareableResource::ShareableResource(Ref<SharedMemory>&& sharedMemory, unsigned 
     , m_offset(offset)
     , m_size(size)
 {
+    Locker locker { allResourcesLock };
+    allResources().add(this);
 }
 
-ShareableResource::~ShareableResource() = default;
+ShareableResource::~ShareableResource()
+{
+    Locker locker { allResourcesLock };
+    allResources().remove(this);
+}
 
 auto ShareableResource::createHandle() -> std::optional<Handle>
 {

@@ -2012,6 +2012,9 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
                 size_t heapPagesReleased = releaseHeapPages ? releaseFreePagesInJavaScriptHeapBlocks(commonVM()) : 0;
                 WTF::releaseFastMallocFreeMemory();
                 process->releaseSystemMallocMemory();
+#if ENABLE(SHAREABLE_RESOURCE)
+                WebCore::releaseResidentPagesOfMappedResources();
+#endif
                 if (trace) {
                     size_t allocated = 0;
                     size_t committed = 0;

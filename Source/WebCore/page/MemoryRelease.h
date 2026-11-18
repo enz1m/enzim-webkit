@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <span>
 #include <wtf/MemoryPressureHandler.h>
 
 namespace WebCore {
@@ -45,5 +46,9 @@ void platformReleaseGraphicsMemory(Critical);
 void jettisonExpensiveObjectsOnTopLevelNavigation();
 WEBCORE_EXPORT void registerMemoryReleaseNotifyCallbacks();
 WEBCORE_EXPORT void logMemoryStatistics(LogMemoryStatisticsReason);
+// Resources mapped from the disk cache stop being resident in this process until they are read
+// again: all of them, or the one these bytes are, if they are one. Defined with ShareableResource.
+WEBCORE_EXPORT void releaseResidentPagesOfMappedResources();
+bool releaseResidentPagesIfMappedResource(std::span<const uint8_t>);
 
 } // namespace WebCore
