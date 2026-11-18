@@ -56,6 +56,8 @@ public:
 
     void updateCapacity(WebProcessPool&);
     unsigned capacity() const { return m_capacity; }
+    // An embedder bound on cached processes and how long each is kept; replaces the RAM-based capacity.
+    void setEmbedderPolicy(WebProcessPool&, unsigned capacity, Seconds lifetime);
 
     unsigned size() const { return m_processesPerSite.size() + m_sharedProcessesPerSite.size() + m_coopProcessesPerOrigin.size(); }
 
@@ -121,6 +123,7 @@ private:
     HashMap<WebCore::SecurityOriginData, Ref<CachedProcess>> m_coopProcessesPerOrigin;
     RunLoop::Timer m_evictionTimer;
     Seconds m_cachedProcessLifetime;
+    std::optional<unsigned> m_embedderCapacity;
 };
 
 } // namespace WebKit

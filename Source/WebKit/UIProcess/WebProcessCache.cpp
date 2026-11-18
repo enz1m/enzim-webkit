@@ -417,6 +417,8 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
         else
             WEBPROCESSCACHE_RELEASE_LOG("updateCapacity: Cache is disabled because cache model is not PrimaryWebBrowser", 0);
         m_capacity = 0;
+    } else if (m_embedderCapacity) {
+        m_capacity = *m_embedderCapacity;
     } else if (capacityOverride >= 0) {
         m_capacity = capacityOverride;
     } else {
@@ -442,6 +444,15 @@ void WebProcessCache::updateCapacity(WebProcessPool& processPool)
     if (!m_capacity)
         clear();
 #endif
+}
+
+void WebProcessCache::setEmbedderPolicy(WebProcessPool& processPool, unsigned capacity, Seconds lifetime)
+{
+    m_embedderCapacity = capacity;
+    m_cachedProcessLifetime = lifetime;
+    updateCapacity(processPool);
+    if (size() > m_capacity)
+        clear();
 }
 
 void WebProcessCache::clear()

@@ -51,6 +51,7 @@
 #include "WebKitWebsiteDataManagerPrivate.h"
 #include "WebKitWebsitePoliciesPrivate.h"
 #include "WebNotificationManagerProxy.h"
+#include "WebProcessCache.h"
 #include "WebProcessMessages.h"
 #include "WebURLSchemeHandler.h"
 #include "WebsiteDataStore.h"
@@ -975,6 +976,21 @@ WebKitNetworkSession* webkit_web_context_get_network_session_for_automation(WebK
  * specifying %WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER. The default value is
  * %WEBKIT_CACHE_MODEL_WEB_BROWSER.
  */
+// A cached web process keeps its whole heap after its last page closes, so an
+// embedder bounds how many are kept and for how long; capacity 0 disables the cache.
+extern "C" WEBKIT_API void webkit_web_context_enzui_set_web_process_cache_v1(WebKitWebContext* context, guint capacity, guint lifetimeMilliseconds)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_CONTEXT(context));
+    auto& processPool = webkitWebContextGetProcessPool(context);
+    protect(processPool.webProcessCache())->setEmbedderPolicy(processPool, capacity, Seconds::fromMilliseconds(lifetimeMilliseconds));
+}
+
+extern "C" WEBKIT_API void webkit_web_context_enzui_clear_web_process_cache_v1(WebKitWebContext* context)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_CONTEXT(context));
+    protect(webkitWebContextGetProcessPool(context).webProcessCache())->clear();
+}
+
 void webkit_web_context_set_cache_model(WebKitWebContext*, WebKitCacheModel model)
 {
     CacheModel cacheModel;
