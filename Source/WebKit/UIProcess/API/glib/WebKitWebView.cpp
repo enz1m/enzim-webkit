@@ -991,6 +991,11 @@ static void webkitWebViewConstructed(GObject* object)
 {
     G_OBJECT_CLASS(webkit_web_view_parent_class)->constructed(object);
 
+#if PLATFORM(WPE)
+    // A versioned capability advertises the renderer's preallocation bound to embedding hosts.
+    g_object_set_data(object, "enzui-full-document-snapshot-max-pixels-v1", GUINT_TO_POINTER(16 * 1024 * 1024));
+#endif
+
     WebKitWebView* webView = WEBKIT_WEB_VIEW(object);
     WebKitWebViewPrivate* priv = webView->priv;
     if (priv->relatedView) {

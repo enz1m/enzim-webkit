@@ -4010,6 +4010,22 @@ static ColorSpace snapshotColorSpace(SnapshotOptions options, WebPage& page)
 
 RefPtr<WebImage> WebPage::snapshotAtSize(const IntRect& rect, const IntSize& bitmapSize, SnapshotOptions options, LocalFrame& frame, LocalFrameView& frameView)
 {
+#if PLATFORM(WPE)
+    if (options.contains(SnapshotOption::FullContentRect)) {
+        constexpr uint64_t maximumPixels = 16 * 1024 * 1024;
+        constexpr int maximumDimension = 16384;
+        auto width = bitmapSize.width();
+        auto height = bitmapSize.height();
+        // The device-scaled bitmap is bounded before creating either its backing store or graphics context.
+        if (width <= 0 || height <= 0 || width > maximumDimension || height > maximumDimension
+            || static_cast<uint64_t>(width) * static_cast<uint64_t>(height) > maximumPixels) {
+            if (!g_strcmp0(g_getenv("WPE_SNAPSHOT_BUDGET_TRACE"), "1"))
+                WTFLogAlways("ENZUI_FULL_DOCUMENT_SNAPSHOT_REJECT width=%d height=%d", width, height);
+            return nullptr;
+        }
+    }
+#endif
+
 #if ENABLE(PDF_PLUGIN)
     ImageOptions imageOptions = m_pluginViews.computeSize() ? ImageOption::Local : ImageOption::Shareable;
 #else
