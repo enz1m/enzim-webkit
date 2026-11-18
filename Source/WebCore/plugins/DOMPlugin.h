@@ -20,6 +20,7 @@
 #pragma once
 
 #include "PluginData.h"
+#include "Navigator.h"
 #include "ScriptWrappable.h"
 #include <wtf/RefCountedAndCanMakeWeakPtr.h>
 #include <wtf/RefPtr.h>
@@ -28,7 +29,6 @@
 namespace WebCore {
 
 class DOMMimeType;
-class Navigator;
 
 class DOMPlugin final : public RefCountedAndCanMakeWeakPtr<DOMPlugin>, public ScriptWrappable {
     WTF_MAKE_TZONE_ALLOCATED(DOMPlugin);

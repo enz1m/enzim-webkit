@@ -51,7 +51,7 @@ def bundle_prefix_and_size_for_path(path: Path, args) -> tuple[str, int]:
     for filt in args.dense_bundle_filter:
         pattern, _, name = filt.partition('=')
         if fnmatch.fnmatch(path, pattern):
-            return name or sanitize(pattern), max(MAX_DENSE_BUNDLE_SIZE, args.max_bundle_size)
+            return name or sanitize(pattern), args.max_bundle_size if args.enforce_cost else max(MAX_DENSE_BUNDLE_SIZE, args.max_bundle_size)
     return sanitize(str(top_level_directory)), args.max_bundle_size
 
 

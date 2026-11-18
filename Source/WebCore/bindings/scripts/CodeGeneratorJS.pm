@@ -54,7 +54,10 @@ my %implIncludes = ();
 # tagged with [StandaloneConstructorAttributes]. The constructor-attribute getter definitions
 # are routed here so the main JS<name>.cpp doesn't sit on the build's critical path.
 my @auxImplContent = ();
+my $auxConstructorAttributeIndex = 0;
 my %auxImplIncludes = ();
+my %auxImplIncludeParts = ();
+my $auxImplPart = 0;
 # When set, AddToImplIncludes routes to %auxImplIncludes instead of %implIncludes.
 # Used while emitting the split-out getter definitions so their header
 # dependencies travel with the moved code rather than polluting the main file.
@@ -734,6 +737,7 @@ sub AddToImplIncludes
 
     if ($auxImplActive) {
         AddToIncludes($header, \%auxImplIncludes, $conditional);
+        $auxImplIncludeParts{$header} |= 1 << $auxImplPart;
         return;
     }
     AddToIncludes($header, \%implIncludes, $conditional);
@@ -744,6 +748,19 @@ sub AddToAuxImplIncludes
     my ($header, $conditional) = @_;
 
     AddToIncludes($header, \%auxImplIncludes, $conditional);
+    $auxImplIncludeParts{$header} = 15;
+}
+
+sub AuxPartitionedInclude
+{
+    my ($include) = @_;
+    my $key = $include;
+    $key =~ s/^"(.*)"$/$1/;
+    my $parts = $auxImplIncludeParts{$key} // 15;
+    return "#include $include\n" if $parts == 15;
+    my @parts = grep { $parts & (1 << $_) } (0 .. 3);
+    my $condition = join(" || ", map { "WEBCORE_CONSTRUCTOR_ATTRIBUTE_PART == $_" } @parts);
+    return "#if !defined(WEBCORE_CONSTRUCTOR_ATTRIBUTE_PART) || $condition\n#include $include\n#endif\n";
 }
 
 sub AddToIncludes
@@ -6041,14 +6058,11 @@ sub GenerateAttributeGetterBodyDefinition
         # Strip off any trailing "Constructor" or "LegacyFactoryFunctionConstructor" to get the real type.
         $constructorType =~ s/Constructor$//;
 
-        # $constructorType ~= /LegacyFactoryFunction$/ indicates that it is LegacyFactoryFunction.
-        # We do not generate the header file for LegacyFactoryFunction of class X,
-        # since we generate the LegacyFactoryFunction declaration into the header file of class X.
-        if ($constructorType ne "any" and $constructorType !~ /LegacyFactoryFunction$/) {
+        # Legacy factory declarations share the ordinary interface's header.
+        $constructorType =~ s/LegacyFactoryFunction$//;
+        if ($constructorType ne "any") {
             AddToImplIncludes("JS" . $constructorType . ".h", $conditional);
         }
-
-        $constructorType =~ s/LegacyFactoryFunction$//;
 
         if (IsDOMGlobalObject($interface)) {
             push(@$outputArray, "    return JS" . $constructorType . "::${constructorGetter}(JSC::getVM(&lexicalGlobalObject), &thisObject);\n");
@@ -6199,6 +6213,9 @@ sub GenerateAttributeGetterDefinition
     }
 
     if ($useStandaloneConstructorAttributes) {
+        my $part = $auxConstructorAttributeIndex++ % 4;
+        $auxImplPart = $part;
+        push(@auxImplContent, "#if !defined(WEBCORE_CONSTRUCTOR_ATTRIBUTE_PART) || WEBCORE_CONSTRUCTOR_ATTRIBUTE_PART == $part\n");
         # The forward declaration with external linkage is already emitted in
         # the main JS<name>.cpp by GenerateAttributeGetterAndSetterDeclaration so
         # the property hash table can take the function's address. Emit a
@@ -6209,6 +6226,7 @@ sub GenerateAttributeGetterDefinition
         GenerateAttributeGetterBodyDefinition(\@auxImplContent, $interface, $className, $attribute, $attributeGetterBodyName, $conditional, $enumerations);
         GenerateAttributeGetterTrampolineDefinition(\@auxImplContent, $interface, $className, $attribute, $attributeGetterName, $attributeGetterBodyName, $conditional);
         $auxImplActive = 0;
+        push(@auxImplContent, "#endif\n");
     } else {
         GenerateAttributeGetterBodyDefinition($outputArray, $interface, $className, $attribute, $attributeGetterBodyName, $conditional, $enumerations);
         GenerateAttributeGetterTrampolineDefinition($outputArray, $interface, $className, $attribute, $attributeGetterName, $attributeGetterBodyName, $conditional);
@@ -8804,12 +8822,12 @@ sub WriteData
         }
 
         foreach my $include (sort @auxIncludes) {
-            $auxContents .= "#include $include\n";
+            $auxContents .= AuxPartitionedInclude($include);
         }
         foreach my $condition (sort keys %auxImplIncludeConditions) {
             $auxContents .= "\n#if " . $condition . "\n";
             foreach my $include (sort @{$auxImplIncludeConditions{$condition}}) {
-                $auxContents .= "#include $include\n";
+                $auxContents .= AuxPartitionedInclude($include);
             }
             $auxContents .= "#endif\n";
         }
@@ -8828,7 +8846,10 @@ sub WriteData
     @implContent = ();
     %implIncludes = ();
     @auxImplContent = ();
+    $auxConstructorAttributeIndex = 0;
     %auxImplIncludes = ();
+    %auxImplIncludeParts = ();
+    $auxImplPart = 0;
 
     # Update a .h file if the contents are changed.
     $contents = join "", @headerContentHeader;

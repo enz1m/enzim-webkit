@@ -3462,6 +3462,20 @@ string(TOLOWER ${CMAKE_HOST_SYSTEM_PROCESSOR} LOWERCASE_CMAKE_HOST_SYSTEM_PROCES
 if (CMAKE_COMPILER_IS_GNUCXX AND "${LOWERCASE_CMAKE_HOST_SYSTEM_PROCESSOR}" MATCHES "(i[3-6]86|x86)$")
     WEBKIT_ADD_TARGET_CXX_FLAGS(WebCore -fno-tree-sra)
 endif ()
+if (WPE_LOW_MEMORY_BUILD)
+    set_source_files_properties(${WebCore_DERIVED_SOURCES_DIR}/JSDOMWindow.cpp PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(${WebCore_DERIVED_SOURCES_DIR}/JSDOMWindowConstructorAttributes.cpp PROPERTIES
+        HEADER_FILE_ONLY ON)
+    foreach (part RANGE 0 3)
+        set(part_source ${WebCore_DERIVED_SOURCES_DIR}/JSDOMWindowConstructorAttributesPart${part}.cpp)
+        file(CONFIGURE OUTPUT ${part_source}
+            CONTENT "#define WEBCORE_CONSTRUCTOR_ATTRIBUTE_PART ${part}\n#include \"${WebCore_DERIVED_SOURCES_DIR}/JSDOMWindowConstructorAttributes.cpp\"\n")
+        set_source_files_properties(${part_source} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+        target_sources(WebCore PRIVATE ${part_source})
+    endforeach ()
+endif ()
+
 # These files are very large and exhaust virtual memory on 32-bit ARM.
 if (WTF_CPU_ARM AND NOT CMAKE_CROSSCOMPILING)
     set(DerivedSources_COMPILE_OPTIONS -O0 -DRELEASE_WITHOUT_OPTIMIZATIONS=ON)

@@ -513,3 +513,5 @@ set(WPEWebProcessExtension_Uninstalled_PKGCONFIG_FILE ${CMAKE_BINARY_DIR}/${WPE_
 
 include(BubblewrapSandboxChecks)
 include(GStreamerChecks)
+
+option(WPE_LOW_MEMORY_BUILD "Split large bindings and limit generator concurrency" OFF)

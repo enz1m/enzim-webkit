@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "Navigator.h"
 #include "PluginData.h"
 #include <wtf/RefCounted.h>
 #include <wtf/RefPtr.h>
@@ -27,7 +28,6 @@
 namespace WebCore {
 
 class DOMPlugin;
-class Navigator;
 
 class DOMMimeType : public RefCounted<DOMMimeType> {
 public:

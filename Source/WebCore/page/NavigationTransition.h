@@ -26,6 +26,7 @@
 #pragma once
 
 #include "JSDOMPromise.h"
+#include "JSDOMPromiseDeferred.h"
 #include "NavigationDestination.h"
 #include "NavigationHistoryEntry.h"
 #include "NavigationNavigationType.h"
@@ -33,7 +34,6 @@
 namespace WebCore {
 
 class DOMPromise;
-class DeferredPromise;
 class Exception;
 
 class NavigationTransition final : public RefCounted<NavigationTransition> {

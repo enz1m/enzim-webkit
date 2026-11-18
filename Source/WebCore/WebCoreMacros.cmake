@@ -54,9 +54,7 @@ option(SHOW_BINDINGS_GENERATION_PROGRESS "Show progress of generating bindings" 
 #       in IDL). Declared as BYPRODUCTS so ninja knows the custom command
 #       produces them; callers add the file to their source list via
 #       Sources.txt (the unified-source machinery) like any other compiled
-#       .cpp. CMake passes --ignoreStandaloneConstructorAttributes so the file
-#       is emitted as an empty TU here, since jumbo bundles negate the split's
-#       parallelism win.
+#       .cpp. Low-memory builds retain the split to bound compiler memory.
 function(GENERATE_BINDINGS target)
     set(options)
     set(oneValueArgs OUTPUT_SOURCE BASE_DIR FEATURES DESTINATION GENERATOR SUPPLEMENTAL_DEPFILE INSPECTOR_NATIVE_FUNCTION_PARAMETERS_FILE)
@@ -128,8 +126,10 @@ function(GENERATE_BINDINGS target)
         --idlFileNamesList ${included_idl_files_list}
         --ppIDLFilesList ${pp_idl_files_list}
         --idlAttributesFile ${idl_attributes_file}
-        --ignoreStandaloneConstructorAttributes
     )
+    if (NOT WPE_LOW_MEMORY_BUILD)
+        list(APPEND args --ignoreStandaloneConstructorAttributes)
+    endif ()
     if (WEBKIT_PLATFORM_FEATURE_DEFINES_FILE)
         list(APPEND args --defines-file ${WEBKIT_PLATFORM_FEATURE_DEFINES_FILE})
     endif ()
@@ -137,7 +137,9 @@ function(GENERATE_BINDINGS target)
         list(APPEND args --supplementalDependencyFile ${arg_SUPPLEMENTAL_DEPFILE})
     endif ()
     ProcessorCount(PROCESSOR_COUNT)
-    if (PROCESSOR_COUNT)
+    if (WPE_LOW_MEMORY_BUILD)
+        list(APPEND args --numOfJobs 1)
+    elseif (PROCESSOR_COUNT)
         list(APPEND args --numOfJobs ${PROCESSOR_COUNT})
     endif ()
     foreach (i IN LISTS arg_PP_EXTRA_OUTPUT)
@@ -147,7 +149,11 @@ function(GENERATE_BINDINGS target)
         list(APPEND args --ppExtraArgs ${i})
     endforeach ()
 
+    set(constructor_attributes_options ${arg_DESTINATION}/${target}ConstructorAttributes.options)
+    file(CONFIGURE OUTPUT ${constructor_attributes_options}
+        CONTENT "WPE_LOW_MEMORY_BUILD=${WPE_LOW_MEMORY_BUILD}\n")
     set(common_generator_dependencies
+        ${constructor_attributes_options}
         ${WEBCORE_DIR}/bindings/scripts/generate-bindings.pl
         ${SCRIPTS_BINDINGS}
         # Changing enabled features should trigger recompiling all IDL files
