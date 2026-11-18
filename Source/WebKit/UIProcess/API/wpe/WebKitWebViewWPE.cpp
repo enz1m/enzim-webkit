@@ -365,6 +365,17 @@ extern "C" WEBKIT_API void webkit_web_view_enzui_release_memory_v1(WebKitWebView
     });
 }
 
+extern "C" WEBKIT_API void webkit_web_view_enzui_release_idle_memory_v1(WebKitWebView* webView)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    auto& page = webkitWebViewGetPage(webView);
+    // A full collection also returns free allocator pages. Unlike the release above it keeps
+    // compiled code, decoded images and caches, so showing the page again costs nothing extra.
+    page.forEachWebContentProcess([](auto& process, auto) {
+        process.send(Messages::WebProcess::GarbageCollectJavaScriptObjects(), 0);
+    });
+}
+
 #if ENABLE(WPE_PLATFORM)
 /**
  * webkit_web_view_toggle_inspector:
