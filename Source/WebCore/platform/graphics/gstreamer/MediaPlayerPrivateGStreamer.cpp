@@ -486,6 +486,7 @@ bool MediaPlayerPrivateGStreamer::isPipelineWaitingPreroll() const
 void MediaPlayerPrivateGStreamer::play()
 {
     GST_DEBUG_OBJECT(pipeline(), "Processing playback request");
+    m_isPausedByPage = false;
     if (isMediaStreamPlayer()) {
         m_pausedTime.reset();
         if (m_startTime.isInvalid())
@@ -526,6 +527,10 @@ void MediaPlayerPrivateGStreamer::play()
         }
     } else
         loadingFailed(MediaPlayer::NetworkState::Empty);
+
+    // A paused video suspended in a hidden page plays with its sound again.
+    if (result == ChangePipelineStateResult::SavedUntilResume)
+        managePlayerSuspend();
 }
 
 void MediaPlayerPrivateGStreamer::pause()
@@ -534,6 +539,9 @@ void MediaPlayerPrivateGStreamer::pause()
         m_pausedTime = currentTime();
 
     m_playbackRatePausedState = PlaybackRatePausedState::ManuallyPaused;
+    if (setPausedByPage(true) || !m_pipeline)
+        return;
+
     GstState currentState, pendingState;
     gst_element_get_state(m_pipeline.get(), &currentState, &pendingState, 0);
     if (currentState < GST_STATE_PAUSED && pendingState <= GST_STATE_PAUSED)
@@ -4448,10 +4456,11 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
     });
 
     bool muted = isMuted();
-    // A silent video in a hidden page is paused by its media session; suspending
-    // it as well releases its decoder, as Chromium suspends paused hidden players.
+    // A silent video in a hidden page is paused by its media session, and a
+    // paused one with sound plays only when the page asks; suspending them
+    // releases their decoders, as Chromium suspends paused hidden players.
     bool silent = muted || !hasAudio();
-    bool isHidden = (muted && !m_isVisibleInViewport) || (silent && !m_pageIsVisible);
+    bool isHidden = (muted && !m_isVisibleInViewport) || ((silent || m_isPausedByPage) && !m_pageIsVisible);
     bool shouldBeSuspended = (player && player->isVideoPlayer()) && isHidden && !allowPlaybackOfInvisibleVideos;
     GST_INFO_OBJECT(m_pipeline.get(), "%s %s player %svisible in viewport, page %svisible", muted ? "Muted" : "Un-muted", (player && player->isVideoPlayer()) ? "video" : "audio", m_isVisibleInViewport ? "" : "not ", m_pageIsVisible ? "" : "not ");
 
@@ -4506,6 +4515,18 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
         m_ongoingReturnFromSuspendedState = resumeState;
         changePipelineState(resumeState);
     }
+}
+
+bool MediaPlayerPrivateGStreamer::setPausedByPage(bool paused)
+{
+    m_isPausedByPage = paused;
+    managePlayerSuspend();
+    if (!isSuspended())
+        return false;
+    // The decoders stay released; the player resumes paused.
+    if (paused && m_stateToResume > GST_STATE_PAUSED)
+        m_stateToResume = GST_STATE_PAUSED;
+    return true;
 }
 
 void MediaPlayerPrivateGStreamer::suspendAfterPreroll()

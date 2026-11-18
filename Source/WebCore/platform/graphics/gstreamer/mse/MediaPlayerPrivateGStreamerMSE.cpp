@@ -141,6 +141,7 @@ void MediaPlayerPrivateGStreamerMSE::load(const URL& url, const LoadOptions&, Me
 void MediaPlayerPrivateGStreamerMSE::play()
 {
     GST_INFO_OBJECT(pipeline(), "Play requested");
+    setPausedByPage(false);
     if (!pipeline())
         rebuildPipeline();
     m_isPaused = false;
@@ -159,7 +160,10 @@ void MediaPlayerPrivateGStreamerMSE::pause()
 
     m_isPaused = true;
     m_playbackRatePausedState = PlaybackRatePausedState::ManuallyPaused;
-    updateStates();
+    // A pipeline released while suspended is rebuilt paused.
+    if (pipeline())
+        updateStates();
+    setPausedByPage(true);
 
     // HTMLMediaElement::pauseInternal() synchronously schedules the pause event right after pausing
     // the player, so without a playbackStateChanged notification here we would still observe an

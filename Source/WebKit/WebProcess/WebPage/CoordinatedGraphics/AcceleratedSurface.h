@@ -157,6 +157,7 @@ public:
 
     void visibilityDidChange(bool);
     void backgroundColorDidChange();
+    void releaseUnusedBuffersWhileHidden();
 
 private:
     AcceleratedSurface(WebPage&, Function<void()>&& frameCompleteHandler, RenderingPurpose);
@@ -497,6 +498,7 @@ private:
     bool m_isVisible { false };
     bool m_useExplicitSync { false };
     std::unique_ptr<RunLoop::Timer> m_releaseUnusedBuffersTimer;
+    bool m_releasesReturnedBuffers { false };
     RefPtr<WTF::RunLoop> m_compositingRunLoop;
 #if ENABLE(DAMAGE_TRACKING)
     SwapChainDamageTracker m_damageTracker;

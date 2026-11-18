@@ -981,6 +981,7 @@ void AcceleratedSurface::visibilityDidChange(bool isVisible)
         if (isVisible) {
             if (timer)
                 timer->stop();
+            protectedThis->m_releasesReturnedBuffers = false;
             return;
         }
 
@@ -1022,6 +1023,19 @@ void AcceleratedSurface::backgroundColorDidChange()
 void AcceleratedSurface::releaseUnusedBuffersTimerFired()
 {
     m_swapChain.releaseUnusedBuffers();
+    // A hidden page keeps no spare buffers; the UI process returns the ones it
+    // still shows or holds when it no longer needs them, and those are freed
+    // as they come back. Showing the page allocates them again.
+    m_releasesReturnedBuffers = true;
+}
+
+void AcceleratedSurface::releaseUnusedBuffersWhileHidden()
+{
+    if (m_isVisible || m_swapChain.isEmpty())
+        return;
+    if (m_releaseUnusedBuffersTimer)
+        m_releaseUnusedBuffersTimer->stop();
+    releaseUnusedBuffersTimerFired();
 }
 
 void AcceleratedSurface::didCreateCompositingRunLoop(RunLoop& runLoop)
@@ -1194,6 +1208,8 @@ void AcceleratedSurface::releaseBuffer(uint64_t targetID, UnixFileDescriptor&& r
     ASSERT(m_swapChain.type() != SwapChain::Type::WPEBackend);
 #endif
     m_swapChain.releaseTarget(targetID, WTF::move(releaseFence));
+    if (m_releasesReturnedBuffers)
+        m_swapChain.releaseUnusedBuffers();
 }
 #endif
 

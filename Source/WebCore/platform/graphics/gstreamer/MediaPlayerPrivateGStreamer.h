@@ -366,6 +366,8 @@ protected:
     void tearDown(bool clearMediaPlayer);
     // Undoes what tearDown(false) stops so that the pipeline can be built again.
     void prepareToRebuildPipeline();
+    // Returns whether the player stays suspended.
+    bool setPausedByPage(bool);
 
     URL m_url;
     const Ref<MainThreadNotifier<MainThreadNotification>> m_notifier;
@@ -690,6 +692,7 @@ private:
 
     bool m_isSuspended { false };
     bool m_didSuspendAfterPreroll { false };
+    bool m_isPausedByPage { true };
     // The state the pipeline should be set back to after the player is resumed.
     GstState m_stateToResume { GST_STATE_VOID_PENDING };
     MediaTime m_positionToResume { MediaTime::invalidTime() };

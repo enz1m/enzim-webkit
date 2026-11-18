@@ -187,8 +187,13 @@ void AcceleratedBackingStore::didCreateAndroidBuffer(uint64_t id, RefPtr<AHardwa
 
 void AcceleratedBackingStore::didDestroyBuffer(uint64_t id)
 {
-    if (auto buffer = m_buffers.take(id))
+    if (auto buffer = m_buffers.take(id)) {
         m_bufferIDs.remove(buffer.get());
+        // The shown buffer of a hidden page is destroyed to free its memory,
+        // which a reference kept here for snapshots would hold on to.
+        if (m_committedBuffer == buffer)
+            m_committedBuffer = nullptr;
+    }
 
     notifyBufferConfigurationIfNeeded();
 }

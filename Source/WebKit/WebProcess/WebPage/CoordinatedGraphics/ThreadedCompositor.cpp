@@ -960,8 +960,10 @@ void ThreadedCompositor::releaseMemory(WTF::Critical critical)
 
         if (!applyTileRemovals || critical != WTF::Critical::Yes)
             return;
-        if (auto* context = protectedThis->compositingGLContext())
+        if (auto* context = protectedThis->compositingGLContext()) {
+            protectedThis->m_surface->releaseUnusedBuffersWhileHidden();
             nudgeDriverToReturnFreedMemory(*context, false);
+        }
         protectedThis->m_workQueue->dispatchAfter(2500_ms, [protectedThis] {
             if (auto* context = protectedThis->compositingGLContext())
                 nudgeDriverToReturnFreedMemory(*context, true);
