@@ -55,6 +55,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 namespace WebCore {
 class BitmapTexture;
 class GLFence;
+class SkiaRecordingResult;
 
 class CoordinatedTileBuffer : public ThreadSafeRefCounted<CoordinatedTileBuffer> {
 public:
@@ -189,6 +190,31 @@ private:
     std::optional<GrDeferredDisplayListRecorder> m_recorder;
     sk_sp<GrDeferredDisplayList> m_displayList;
 #endif
+};
+
+// A tile the GPU process paints: it carries the layer's recording and paints
+// nothing here.
+class CoordinatedRecordedTileBuffer final : public CoordinatedTileBuffer {
+public:
+    WEBCORE_EXPORT static Ref<CoordinatedTileBuffer> create(Ref<SkiaRecordingResult>&&, const IntSize&, Flags);
+    WEBCORE_EXPORT virtual ~CoordinatedRecordedTileBuffer();
+
+    const Ref<SkiaRecordingResult>& recording() const LIFETIME_BOUND { return m_recording; }
+
+private:
+    CoordinatedRecordedTileBuffer(Ref<SkiaRecordingResult>&&, const IntSize&, Flags);
+
+    bool isBackedByOpenGL() const final { return false; }
+    IntSize size() const final { return m_size; }
+    PixelFormat pixelFormat() const final { return PixelFormat::RGBA8; }
+
+    bool beginPainting() final { return false; }
+    void completePainting() final { }
+
+    SkCanvas* canvas() final { return nullptr; }
+
+    const Ref<SkiaRecordingResult> m_recording;
+    IntSize m_size;
 };
 #endif // USE(SKIA)
 

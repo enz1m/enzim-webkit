@@ -82,8 +82,13 @@ namespace WebKit {
 class AcceleratedSurface;
 }
 
+namespace IPC {
+class Connection;
+}
+
 namespace WebKit {
 class WebPage;
+struct CoordinatedCompositorFrame;
 
 // Whether the target holds the frame it was meant to hold once rendering ends. A frame that painted
 // nothing because the target was already current is still Valid.
@@ -159,6 +164,31 @@ public:
     void backgroundColorDidChange();
     void releaseUnusedBuffersWhileHidden();
 
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    // Frames are composited by the GPU process into buffers this surface
+    // allocates without a GL context.
+    void setRemoteCompositor(Ref<IPC::Connection>&&, uint64_t identifier);
+    // A new GPU process: buffers are registered with it again.
+    void reconnectRemoteCompositor(Ref<IPC::Connection>&&);
+    // The GPU process created this page's compositor; until then nothing is
+    // sent to it.
+    void remoteCompositorIsReady() { m_remoteCompositor.isReady = true; }
+    bool isRemoteCompositorReady() const { return m_remoteCompositor.isReady; }
+    bool usesRemoteConnection(const IPC::Connection& connection) const { return m_remoteCompositor.connection.get() == &connection; }
+    bool compositesRemotely() const { return !!m_remoteCompositor.connection; }
+    // Returns whether animations are still running, or nothing when no frame
+    // was rendered.
+    std::optional<bool> renderFrameRemotely(CoordinatedCompositorFrame&&);
+    // Returns the target of a frame the GPU process did not render to the
+    // swap chain instead of sending it.
+    void discardFrame();
+    // Applies layer changes in the GPU process without rendering, then frees
+    // its unused resources.
+    void releaseMemoryRemotely(CoordinatedCompositorFrame&&, bool critical);
+#else
+    bool compositesRemotely() const { return false; }
+#endif
+
 private:
     AcceleratedSurface(WebPage&, Function<void()>&& frameCompleteHandler, RenderingPurpose);
 
@@ -200,6 +230,8 @@ private:
 
         virtual void sync(bool) { }
         virtual void setReleaseFenceFD(UnixFileDescriptor&&) { }
+        virtual UnixFileDescriptor takeReleaseFenceFD() { return { }; }
+        virtual void setRenderingFenceFD(UnixFileDescriptor&&) { }
 
         SkSurface* skiaSurface() const { return m_skiaSurface.get(); }
 
@@ -317,6 +349,24 @@ private:
         EGLImage m_image { nullptr };
     };
 #endif // USE(GBM) || OS(ANDROID)
+
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    // A swap chain buffer the GPU process renders into.
+    class RenderTargetRemote final : public RenderTarget {
+    public:
+        RenderTargetRemote(AcceleratedSurface&, const WebCore::IntSize&, WebCore::DMABufBufferAttributes&&, RendererBufferFormat::Usage);
+        ~RenderTargetRemote();
+
+    private:
+        void sendFrame(Vector<WebCore::IntRect, 1>&&) override;
+        void setReleaseFenceFD(UnixFileDescriptor&& fence) override { m_releaseFenceFD = WTF::move(fence); }
+        UnixFileDescriptor takeReleaseFenceFD() override { return WTF::move(m_releaseFenceFD); }
+        void setRenderingFenceFD(UnixFileDescriptor&& fence) override { m_renderingFenceFD = WTF::move(fence); }
+
+        UnixFileDescriptor m_renderingFenceFD;
+        UnixFileDescriptor m_releaseFenceFD;
+    };
+#endif
 
     class RenderTargetSHMImage final : public RenderTargetShareableBuffer {
     public:
@@ -499,6 +549,15 @@ private:
     bool m_useExplicitSync { false };
     std::unique_ptr<RunLoop::Timer> m_releaseUnusedBuffersTimer;
     bool m_releasesReturnedBuffers { false };
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    struct {
+        RefPtr<IPC::Connection> connection;
+        uint64_t identifier { 0 };
+        // A stray FrameDone must not complete a frame still being rendered.
+        unsigned framesInFlight { 0 };
+        bool isReady { false };
+    } m_remoteCompositor;
+#endif
     RefPtr<WTF::RunLoop> m_compositingRunLoop;
 #if ENABLE(DAMAGE_TRACKING)
     SwapChainDamageTracker m_damageTracker;

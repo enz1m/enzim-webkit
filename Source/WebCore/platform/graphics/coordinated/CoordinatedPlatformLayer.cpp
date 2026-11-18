@@ -32,12 +32,16 @@
 #include "CoordinatedImageBackingStore.h"
 #include "CoordinatedPlatformLayerBuffer.h"
 #include "CoordinatedPlatformLayerBufferHolePunch.h"
+#if USE(GBM)
+#include "CoordinatedPlatformLayerBufferDMABuf.h"
+#endif
 #include "CoordinatedPlatformLayerBufferVideo.h"
 #include "CoordinatedTileBuffer.h"
 #include "CoordinatedTileManager.h"
 #include "GraphicsContext.h"
 #include "GraphicsLayerCoordinated.h"
 #include "NativeImage.h"
+#include "ProcessCapabilities.h"
 #include <wtf/MainThread.h>
 
 #if USE(TEXTURE_MAPPER)
@@ -46,7 +50,10 @@
 #endif
 
 #if USE(SKIA)
+#include "CoordinatedLayerChanges.h"
 #include "SkiaCompositingLayer.h"
+#include "SkiaRecordingResult.h"
+#include "SkiaRemotePicture.h"
 #endif
 
 namespace WebCore {
@@ -566,6 +573,13 @@ void CoordinatedPlatformLayer::replaceCurrentContentsBufferWithCopy()
     m_contentsBuffer.hasCommitted = !!m_contentsBuffer.committed;
     ensureTarget().setContentsLayer(m_contentsBuffer.committed.get());
 #else
+    // The GPU process keeps showing its own import of the frame; letting go
+    // of it here lets the decoder free its buffers.
+    if (ProcessCapabilities::compositesInGPUProcess()) {
+        m_contentsBuffer.committed = nullptr;
+        return;
+    }
+
     if (!m_target)
         return;
 
@@ -1536,6 +1550,198 @@ void CoordinatedPlatformLayer::flushCompositingStateOnTarget(const OptionSet<Com
             m_pendingChanges.remove(Change::ContentsBuffer);
         }
     }
+}
+#endif
+
+#if !USE(TEXTURE_MAPPER)
+void CoordinatedPlatformLayer::markAllChangesPending()
+{
+    Locker locker { m_lock };
+    m_pendingChanges.add({
+        Change::AnchorPoint, Change::Animations, Change::Backdrop, Change::BackdropRect, Change::BackdropRoot,
+        Change::BackdropShapePath, Change::BackfaceVisibility, Change::BackgroundColor, Change::BackingStore,
+        Change::BlendMode, Change::BoundsOrigin, Change::Children, Change::ChildrenTransform, Change::ClipPath,
+        Change::ContentsClippingRect, Change::ContentsClipShapePath, Change::ContentsColor, Change::ContentsImage,
+        Change::ContentsOpaque, Change::ContentsRect, Change::ContentsRectClipsDescendants, Change::ContentsTiling,
+        Change::ContentsVisible, Change::Filters, Change::Mask, Change::MasksToBounds, Change::Opacity,
+        Change::Position, Change::Preserves3D, Change::Replica, Change::Size, Change::Transform });
+}
+
+bool CoordinatedPlatformLayer::flushCompositingStateRemote(const OptionSet<CompositionReason>& reasons, CoordinatedLayerChanges& changes)
+{
+    ASSERT(!isMainThread());
+    Locker locker { m_lock };
+    changes.id = m_id;
+    bool changed = false;
+    auto take = [&](Change change) {
+        assertIsHeld(m_lock);
+        if (!m_pendingChanges.contains(change))
+            return false;
+        m_pendingChanges.remove(change);
+        changed = true;
+        return true;
+    };
+
+    if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::AsyncScrolling })) {
+        if (take(Change::Position))
+            changes.position = m_position;
+        if (take(Change::BoundsOrigin))
+            changes.boundsOrigin = m_boundsOrigin;
+        if (take(Change::ContentsRect))
+            changes.contentsRect = m_contentsRect;
+        if (take(Change::ContentsClippingRect))
+            changes.contentsClippingRect = m_contentsClippingRect;
+        if (take(Change::ContentsClipShapePath))
+            changes.contentsClipShapePath = m_contentsClipShapePath;
+        if (take(Change::ContentsImage)) {
+            if (m_imageBackingStore.current && m_imageBackingStore.current->platformImage())
+                changes.contentsImage = SkiaPictureSerializer::singleton().serializeImage(*m_imageBackingStore.current->platformImage());
+            else
+                changes.contentsImage = Vector<uint8_t> { };
+        }
+    }
+
+    if (reasons.contains(CompositionReason::RenderingUpdate)) {
+        if (take(Change::AnchorPoint))
+            changes.anchorPoint = m_anchorPoint;
+        if (take(Change::Size))
+            changes.size = m_size;
+        if (take(Change::Transform))
+            changes.transform = m_transform;
+        if (take(Change::ChildrenTransform))
+            changes.childrenTransform = m_childrenTransform;
+        if (take(Change::Preserves3D))
+            changes.preserves3D = m_preserves3D;
+        if (take(Change::MasksToBounds))
+            changes.masksToBounds = m_masksToBounds;
+        if (take(Change::BackfaceVisibility))
+            changes.backfaceVisibility = m_backfaceVisibility;
+        if (take(Change::BackgroundColor))
+            changes.backgroundColor = m_backgroundColor;
+        if (take(Change::Opacity))
+            changes.opacity = m_opacity;
+        if (take(Change::BlendMode))
+            changes.blendMode = m_blendMode;
+        if (take(Change::BackingStore))
+            changes.useBackingStore = !!m_backingStoreProxy;
+        if (take(Change::ContentsVisible))
+            changes.contentsVisible = m_contentsVisible;
+        if (take(Change::ContentsOpaque))
+            changes.contentsOpaque = m_contentsOpaque;
+        if (take(Change::ContentsRectClipsDescendants))
+            changes.contentsRectClipsDescendants = m_contentsRectClipsDescendants;
+        if (take(Change::ContentsTiling)) {
+            changes.contentsTileSize = m_contentsTileSize;
+            changes.contentsTilePhase = m_contentsTilePhase;
+        }
+        if (take(Change::ContentsColor))
+            changes.contentsColor = m_contentsColor;
+        if (take(Change::ClipPath)) {
+            changes.clipPath = m_clipPath.path;
+            changes.clipPathWindRule = m_clipPath.windRule;
+        }
+        if (take(Change::Filters))
+            changes.filters = m_filters;
+        if (take(Change::Mask))
+            changes.mask = m_mask ? std::optional { m_mask->id() } : std::nullopt;
+        if (take(Change::Replica))
+            changes.replica = m_replica ? std::optional { m_replica->id() } : std::nullopt;
+
+        if (m_backdrop) {
+            Locker backdropLocker { m_backdrop->lock() };
+            if (m_pendingChanges.contains(Change::Backdrop) || m_backdrop->m_pendingChanges.contains(Change::Filters)) {
+                changes.backdropFilters = m_backdrop->m_filters;
+                m_pendingChanges.remove(Change::Backdrop);
+                m_backdrop->m_pendingChanges.remove(Change::Filters);
+                changed = true;
+            }
+        } else if (take(Change::Backdrop))
+            changes.backdropFilters = FilterOperations();
+        if (take(Change::BackdropRect))
+            changes.backdropRect = m_backdropRect;
+        if (take(Change::BackdropShapePath))
+            changes.backdropShapePath = m_backdropShapePath;
+        if (take(Change::BackdropRoot))
+            changes.isBackdropRoot = m_isBackdropRoot;
+        if (take(Change::Animations))
+            changes.animations = m_animations.data();
+        // Debug indicators are not composited remotely.
+        take(Change::DebugIndicators);
+        if (take(Change::Children))
+            changes.children = WTF::map(m_children, [](auto& child) { return child->id(); });
+
+        if (m_backingStoreProxy) {
+            auto update = m_backingStoreProxy->takePendingUpdate();
+            if (!update.isEmpty()) {
+                CoordinatedTileChanges tiles;
+                tiles.contentsScale = m_contentsScale;
+                tiles.tilesToCreate = update.tilesToCreate();
+                tiles.tilesToRemove = update.tilesToRemove();
+                HashMap<SkiaRecordingResult*, uint32_t> recordingIndices;
+                // In this mode the tile manager makes only recorded tiles.
+                for (const auto& tileUpdate : update.tilesToUpdate()) {
+                    auto& recording = static_cast<CoordinatedRecordedTileBuffer&>(tileUpdate.buffer.get()).recording().get();
+                    auto addResult = recordingIndices.ensure(&recording, [&] {
+                        tiles.recordings.append({ SkiaPictureSerializer::singleton().serialize(*recording.picture()), recording.recordRect(), recording.contentsOpaque() });
+                        return tiles.recordings.size() - 1;
+                    });
+                    tiles.tilesToUpdate.append({ tileUpdate.tileID, tileUpdate.tileRect, tileUpdate.dirtyRect, addResult.iterator->value });
+                }
+                changes.tiles = WTF::move(tiles);
+                changed = true;
+            }
+        }
+    }
+
+    if (reasons.containsAny({ CompositionReason::RenderingUpdate, CompositionReason::VideoFrame, CompositionReason::AsyncScrolling })) {
+#if ENABLE(DAMAGE_TRACKING)
+        if (take(Change::Damage))
+            m_damage = std::nullopt;
+#endif
+        if (take(Change::ContentsBuffer)) {
+            m_contentsBuffer.hasCommitted = !!m_contentsBuffer.pending;
+            // The GPU process may draw the buffer again in later frames, so
+            // it is kept until replaced: a decoder must not reuse a frame
+            // that is still shown.
+            auto buffer = WTF::move(m_contentsBuffer.pending);
+            auto* pending = buffer.get();
+            m_contentsBuffer.committed = WTF::move(buffer);
+#if USE(GBM)
+            auto sendDMABuf = [&](const DMABufBuffer& dmabuf, UnixFileDescriptor&& fence, bool isOpaque, CoordinatedPlatformLayerBuffer::Origin origin) {
+                const auto& attributes = dmabuf.attributes();
+                changes.contentsDMABuf = CoordinatedDMABufContents {
+                    DMABufBufferAttributes { attributes.size, attributes.fourcc, WTF::map(attributes.fds, [](const auto& fd) { return fd.duplicate(); }), attributes.offsets, attributes.strides, attributes.modifier },
+                    WTF::move(fence), isOpaque, origin == CoordinatedPlatformLayerBuffer::Origin::BottomLeft,
+                    dmabuf.colorSpace().transform([](auto value) { return static_cast<uint8_t>(value); }),
+                    dmabuf.transferFunction().transform([](auto value) { return static_cast<uint8_t>(value); })
+                };
+            };
+            if (auto* dmabufBuffer = dynamicDowncast<CoordinatedPlatformLayerBufferDMABuf>(pending)) {
+                sendDMABuf(dmabufBuffer->dmabuf(), dmabufBuffer->takeFenceFD(), dmabufBuffer->isOpaque(), dmabufBuffer->origin());
+                return changed;
+            }
+#if ENABLE(VIDEO) && USE(GSTREAMER)
+#if GST_CHECK_VERSION(1, 24, 0)
+            if (auto* videoBuffer = dynamicDowncast<CoordinatedPlatformLayerBufferVideo>(pending)) {
+                if (RefPtr dmabuf = videoBuffer->dmabuf()) {
+                    sendDMABuf(*dmabuf, { }, videoBuffer->isOpaque(), videoBuffer->origin());
+                    return changed;
+                }
+            }
+#endif
+#endif
+#endif
+            // Other buffers are sent as pixels, when they are in this
+            // process's memory.
+            sk_sp<SkImage> image = pending ? pending->skiaImage() : nullptr;
+            if (image && !image->isTextureBacked())
+                changes.contentsBuffer = SkiaPictureSerializer::serializeTransientImage(*image);
+            else
+                changes.contentsBuffer = Vector<uint8_t> { };
+        }
+    }
+
+    return changed;
 }
 #endif
 

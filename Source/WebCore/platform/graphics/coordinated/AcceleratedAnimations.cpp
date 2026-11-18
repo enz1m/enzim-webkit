@@ -23,7 +23,93 @@
 
 #if USE(COORDINATED_GRAPHICS) && !USE(TEXTURE_MAPPER)
 
+#include "CoordinatedLayerChanges.h"
+#include "GraphicsLayerAnimation.h"
+#include "GraphicsLayerFilterAnimationValue.h"
+#include "GraphicsLayerFloatAnimationValue.h"
+#include "GraphicsLayerTransformAnimationValue.h"
+
 namespace WebCore {
+
+CoordinatedAnimationsData AcceleratedAnimations::data() const
+{
+    CoordinatedAnimationsData data;
+    data.translate = m_transforms.translate;
+    data.rotate = m_transforms.rotate;
+    data.scale = m_transforms.scale;
+    data.transform = m_transforms.transform;
+    data.animations = WTF::map(m_animations, [](const Entry& entry) {
+        const auto& animation = entry.animation.get();
+        const auto& keyframes = animation.keyframes();
+        CoordinatedAnimationData animationData;
+        animationData.name = animation.name();
+        animationData.property = static_cast<uint8_t>(keyframes.property());
+        for (size_t i = 0; i < keyframes.size(); ++i) {
+            const auto& value = keyframes.at(i);
+            CoordinatedAnimationKeyframe keyframe;
+            keyframe.keyTime = value.keyTime();
+            if (value.timingFunction())
+                keyframe.timingFunction = value.timingFunction()->clone();
+            if (auto* floatValue = dynamicDowncast<GraphicsLayerFloatAnimationValue>(value))
+                keyframe.floatValue = floatValue->value();
+            else if (auto* transformValue = dynamicDowncast<GraphicsLayerTransformAnimationValue>(value))
+                keyframe.transform = transformValue->value();
+            else if (auto* filterValue = dynamicDowncast<GraphicsLayerFilterAnimationValue>(value))
+                keyframe.filters = filterValue->value();
+            animationData.keyframes.append(WTF::move(keyframe));
+        }
+        animationData.timingFunction = animation.timingFunction().clone();
+        if (animation.defaultTimingFunctionForKeyframes())
+            animationData.defaultTimingFunctionForKeyframes = animation.defaultTimingFunctionForKeyframes()->clone();
+        animationData.iterationCount = animation.iterationCount();
+        animationData.duration = animation.duration();
+        animationData.direction = static_cast<uint8_t>(animation.direction());
+        animationData.startTime = entry.playback.startTime;
+        animationData.pauseTime = entry.playback.pauseTime;
+        animationData.state = static_cast<uint8_t>(entry.playback.state);
+        return animationData;
+    });
+    return data;
+}
+
+AcceleratedAnimations AcceleratedAnimations::fromData(CoordinatedAnimationsData&& data)
+{
+    AcceleratedAnimations animations;
+    animations.m_transforms = { data.translate, data.rotate, data.scale, data.transform };
+    for (auto& animationData : data.animations) {
+        auto property = static_cast<AnimatedProperty>(animationData.property);
+        GraphicsLayerKeyframeValueList keyframes(property);
+        for (auto& keyframe : animationData.keyframes) {
+            switch (property) {
+            case AnimatedProperty::Opacity:
+                keyframes.insert(makeUnique<GraphicsLayerFloatAnimationValue>(keyframe.keyTime, keyframe.floatValue, keyframe.timingFunction.get()));
+                break;
+            case AnimatedProperty::Filter:
+            case AnimatedProperty::WebkitBackdropFilter:
+                keyframes.insert(makeUnique<GraphicsLayerFilterAnimationValue>(keyframe.keyTime, keyframe.filters, keyframe.timingFunction.get()));
+                break;
+            default:
+                keyframes.insert(makeUnique<GraphicsLayerTransformAnimationValue>(keyframe.keyTime, keyframe.transform, keyframe.timingFunction.get()));
+                break;
+            }
+        }
+        Ref graphicsLayerAnimation = GraphicsLayerAnimation::create();
+        if (!animationData.timingFunction)
+            continue;
+        graphicsLayerAnimation->setTimingFunction(WTF::move(animationData.timingFunction));
+        graphicsLayerAnimation->setDefaultTimingFunctionForKeyframes(WTF::move(animationData.defaultTimingFunctionForKeyframes));
+        graphicsLayerAnimation->setIterationCount(animationData.iterationCount);
+        graphicsLayerAnimation->setDuration(animationData.duration);
+        graphicsLayerAnimation->setDirection(static_cast<GraphicsLayerAnimation::Direction>(animationData.direction));
+
+        AcceleratedAnimation::Playback playback;
+        playback.startTime = animationData.startTime;
+        playback.pauseTime = animationData.pauseTime;
+        playback.state = static_cast<AcceleratedAnimation::State>(animationData.state);
+        animations.m_animations.append({ AcceleratedAnimation::create(animationData.name, keyframes, graphicsLayerAnimation), WTF::move(playback) });
+    }
+    return animations;
+}
 
 void AcceleratedAnimations::add(Ref<const AcceleratedAnimation>&& animation, MonotonicTime startTime)
 {

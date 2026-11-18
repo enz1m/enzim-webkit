@@ -53,6 +53,7 @@ namespace WebCore {
         size_t decodeIfNeededAndGetFrameCount() const override { return m_frameCount; }
         RepetitionCount repetitionCount() const override;
         ScalableImageDecoderFrame* frameBufferAtIndex(size_t index) override;
+        bool supportsDeferredDecoding() const final { return true; }
         // CAUTION: setFailed() deletes |m_reader|.  Be careful to avoid
         // accessing deleted memory, especially when calling this from inside
         // PNGImageReader!

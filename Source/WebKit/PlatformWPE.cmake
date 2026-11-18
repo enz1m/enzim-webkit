@@ -116,6 +116,7 @@ endif ()
 
 list(APPEND WebKit_SERIALIZATION_IN_FILES
     Shared/glib/AvailableInputDevices.serialization.in
+    Shared/glib/CoordinatedCompositorFrame.serialization.in
     Shared/glib/CoreIPCGByteArray.serialization.in
     Shared/glib/CoreIPCGTlsCertificate.serialization.in
     Shared/glib/CoreIPCGUnixFDList.serialization.in
@@ -489,6 +490,15 @@ endif ()
 list(APPEND WebKit_MESSAGES_IN_FILES
     WebProcess/glib/SystemSettingsManager
 )
+
+if (ENABLE_GPU_PROCESS)
+    list(APPEND WebKit_MESSAGES_IN_FILES
+        GPUProcess/graphics/coordinated/RemoteCoordinatedCompositor
+    )
+    list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
+        "${WEBKIT_DIR}/GPUProcess/graphics/coordinated"
+    )
+endif ()
 
 if (ENABLE_WPE_PLATFORM)
     list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES

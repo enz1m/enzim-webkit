@@ -1,0 +1,151 @@
+# Copyright (C) 2025 Igalia, S.L.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1.  Redistributions of source code must retain the above copyright
+#     notice, this list of conditions and the following disclaimer.
+# 2.  Redistributions in binary form must reproduce the above copyright
+#     notice, this list of conditions and the following disclaimer in the
+#     documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS BE LIABLE FOR
+# ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader] struct WebCore::CoordinatedTileRecording {
+    uint32_t tileID;
+    WebCore::IntRect tileRect;
+    WebCore::IntRect dirtyRect;
+    uint32_t recordingIndex;
+}
+
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader] struct WebCore::CoordinatedRecordingData {
+    Vector<uint8_t> picture;
+    WebCore::IntRect recordRect;
+    bool contentsOpaque;
+}
+
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader] struct WebCore::CoordinatedTileChanges {
+    Vector<uint32_t> tilesToCreate;
+    Vector<WebCore::CoordinatedTileRecording> tilesToUpdate;
+    Vector<uint32_t> tilesToRemove;
+    Vector<WebCore::CoordinatedRecordingData> recordings;
+    float contentsScale;
+}
+
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader] struct WebCore::CoordinatedAnimationKeyframe {
+    double keyTime;
+    RefPtr<WebCore::TimingFunction> timingFunction;
+    float floatValue;
+    WebCore::TransformOperations transform;
+    WebCore::FilterOperations filters;
+}
+
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader] struct WebCore::CoordinatedAnimationData {
+    String name;
+    uint8_t property;
+    Vector<WebCore::CoordinatedAnimationKeyframe> keyframes;
+    RefPtr<WebCore::TimingFunction> timingFunction;
+    RefPtr<WebCore::TimingFunction> defaultTimingFunctionForKeyframes;
+    double iterationCount;
+    double duration;
+    uint8_t direction;
+    MonotonicTime startTime;
+    Seconds pauseTime;
+    uint8_t state;
+}
+
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader] struct WebCore::CoordinatedAnimationsData {
+    Vector<WebCore::CoordinatedAnimationData> animations;
+    WebCore::TransformationMatrix translate;
+    WebCore::TransformationMatrix rotate;
+    WebCore::TransformationMatrix scale;
+    WebCore::TransformationMatrix transform;
+}
+
+#if USE(GBM)
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader, RValue] struct WebCore::CoordinatedDMABufContents {
+    WebCore::DMABufBufferAttributes attributes;
+    UnixFileDescriptor fence;
+    bool isOpaque;
+    bool originIsBottomLeft;
+    std::optional<uint8_t> colorSpace;
+    std::optional<uint8_t> transferFunction;
+}
+#endif
+
+header: <WebCore/CoordinatedLayerChanges.h>
+[CustomHeader, RValue] struct WebCore::CoordinatedLayerChanges {
+    WebCore::PlatformLayerIdentifier id;
+    std::optional<WebCore::FloatPoint> position;
+    std::optional<WebCore::FloatPoint> boundsOrigin;
+    std::optional<WebCore::FloatPoint3D> anchorPoint;
+    std::optional<WebCore::FloatSize> size;
+    std::optional<WebCore::TransformationMatrix> transform;
+    std::optional<WebCore::TransformationMatrix> childrenTransform;
+    std::optional<bool> preserves3D;
+    std::optional<bool> masksToBounds;
+    std::optional<bool> backfaceVisibility;
+    std::optional<WebCore::Color> backgroundColor;
+    std::optional<float> opacity;
+    std::optional<WebCore::BlendMode> blendMode;
+    std::optional<bool> useBackingStore;
+    std::optional<bool> contentsVisible;
+    std::optional<bool> contentsOpaque;
+    std::optional<bool> contentsRectClipsDescendants;
+    std::optional<WebCore::FloatRect> contentsRect;
+    std::optional<WebCore::FloatRoundedRect> contentsClippingRect;
+    std::optional<WebCore::Path> contentsClipShapePath;
+    std::optional<WebCore::FloatSize> contentsTileSize;
+    std::optional<WebCore::FloatSize> contentsTilePhase;
+    std::optional<WebCore::Color> contentsColor;
+    std::optional<WebCore::Path> clipPath;
+    std::optional<WebCore::WindRule> clipPathWindRule;
+    std::optional<WebCore::FilterOperations> filters;
+    std::optional<std::optional<WebCore::PlatformLayerIdentifier>> mask;
+    std::optional<std::optional<WebCore::PlatformLayerIdentifier>> replica;
+    std::optional<WebCore::FilterOperations> backdropFilters;
+    std::optional<WebCore::FloatRoundedRect> backdropRect;
+    std::optional<WebCore::Path> backdropShapePath;
+    std::optional<bool> isBackdropRoot;
+    std::optional<Vector<WebCore::PlatformLayerIdentifier>> children;
+    std::optional<WebCore::CoordinatedTileChanges> tiles;
+    std::optional<WebCore::CoordinatedAnimationsData> animations;
+    std::optional<Vector<uint8_t>> contentsImage;
+    std::optional<Vector<uint8_t>> contentsBuffer;
+#if USE(GBM)
+    std::optional<WebCore::CoordinatedDMABufContents> contentsDMABuf;
+#endif
+}
+
+header: "CoordinatedCompositorFrame.h"
+[RValue] struct WebKit::CoordinatedCompositorFrame {
+    WebCore::PlatformLayerIdentifier rootLayer;
+    Vector<WebCore::CoordinatedLayerChanges> layers;
+    Vector<WebCore::PlatformLayerIdentifier> removedLayers;
+    uint64_t bufferID;
+    WebCore::IntSize viewportSize;
+    float deviceScaleFactor;
+    bool paintsMirrored;
+    std::optional<uint32_t> clearColor;
+    UnixFileDescriptor releaseFence;
+}
+
+#endif // USE(COORDINATED_GRAPHICS) && USE(SKIA)

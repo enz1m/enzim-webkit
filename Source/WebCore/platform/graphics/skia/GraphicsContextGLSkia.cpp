@@ -61,6 +61,9 @@ static std::optional<GraphicsContextGL::DataFormat> dataFormatForColorType(SkCol
 bool GraphicsContextGLImageExtractor::extractImage(std::optional<AlphaPremultiplication> sourceAlphaPremultiplication, bool premultiplyAlpha)
 {
     auto platformImage = m_image->platformImage();
+    // A still image the GPU process decodes is decoded here when uploaded.
+    if (platformImage && platformImage->isLazyGenerated())
+        platformImage = platformImage->makeRasterImage(nullptr);
     if (!platformImage)
         return false;
 

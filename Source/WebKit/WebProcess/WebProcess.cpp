@@ -143,6 +143,7 @@
 #include <WebCore/PlatformKeyboardEvent.h>
 #include <WebCore/PlatformMediaEngineConfigurationFactory.h>
 #include <WebCore/PlatformMediaSession.h>
+#include <WebCore/ProcessCapabilities.h>
 #include <WebCore/ProcessIdentifier.h>
 #include <WebCore/ProcessWarming.h>
 #include <WebCore/Quirks.h>
@@ -1096,6 +1097,15 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
 
     // Read before the parameters are moved from.
     auto accessibilityMode = parameters.accessibilityMode;
+
+#if ENABLE(GPU_PROCESS) && USE(GBM) && USE(SKIA)
+    // The first page decides for the process: its compositor and buffers are
+    // made for one mode.
+    if (m_pageMap.isEmpty() && parameters.store.getBoolValueForKey(WebPreferencesKey::useGPUProcessForCompositingEnabledKey())) {
+        ProcessCapabilities::setCompositesInGPUProcess(true);
+        ProcessCapabilities::setCanUseAcceleratedBuffers(false);
+    }
+#endif
 
     auto addResult = m_pageMap.ensure(pageID, [&] {
         return WebPage::create(pageID, WTF::move(parameters));

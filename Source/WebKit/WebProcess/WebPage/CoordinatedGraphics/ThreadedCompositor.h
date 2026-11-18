@@ -27,6 +27,9 @@
 
 #if USE(COORDINATED_GRAPHICS)
 #include <WebCore/CoordinatedCompositionReason.h>
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+#include "GPUProcessConnection.h"
+#endif
 #include <WebCore/Damage.h>
 #include <WebCore/DisplayUpdate.h>
 #include <WebCore/FloatRect.h>
@@ -72,7 +75,11 @@ class LayerTreeHost;
 class WebPage;
 struct RenderProcessInfo;
 
-class ThreadedCompositor : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<ThreadedCompositor>, public CanMakeThreadSafeCheckedPtr<ThreadedCompositor> {
+class ThreadedCompositor : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<ThreadedCompositor>, public CanMakeThreadSafeCheckedPtr<ThreadedCompositor>
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    , private GPUProcessConnection::Client
+#endif
+{
     WTF_MAKE_TZONE_ALLOCATED(ThreadedCompositor);
     WTF_MAKE_NONCOPYABLE(ThreadedCompositor);
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(ThreadedCompositor);
@@ -119,9 +126,19 @@ public:
     sk_sp<GrContextThreadSafeProxy> threadSafeGrContext() const { return m_threadSafeGrContext; }
 #endif
 
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    WTF_ABSTRACT_THREAD_SAFE_REF_COUNTED_AND_CAN_MAKE_WEAK_PTR_IMPL;
+#endif
+
 private:
     WebCore::GLContext* compositingGLContext();
     ThreadedCompositor(WebPage&, LayerTreeHost&, CoordinatedSceneState&);
+
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    // Creates this page's compositor in the GPU process, after a relaunch too.
+    Ref<IPC::Connection> connectToRemoteCompositor();
+    void gpuProcessConnectionDidClose(GPUProcessConnection&) final;
+#endif
 
     void startRenderTimer();
     void stopRenderTimer();
@@ -131,6 +148,9 @@ private:
     void scheduleUpdateLocked();
     void flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
     void renderLayerTree();
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    void renderLayerTreeRemotely(const OptionSet<WebCore::CompositionReason>&, const WebCore::IntSize&, float deviceScaleFactor, bool shouldNotifyDidComposite);
+#endif
     TargetContents paintToCurrentGLContext(const WebCore::TransformationMatrix&, const WebCore::IntSize&, const OptionSet<WebCore::CompositionReason>&);
 #if USE(TEXTURE_MAPPER)
     void paintToTextureMapper(const WebCore::TransformationMatrix&, const WebCore::IntSize&, const OptionSet<WebCore::CompositionReason>&);
@@ -168,6 +188,10 @@ private:
 #endif
 
     int m_maxTextureSize { 0 };
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    // A composition came while the GPU process compositor was not ready yet.
+    bool m_remoteCompositionDeferred { false };
+#endif
     std::atomic<unsigned> m_suspendedCount { 0 };
 
     enum class State {

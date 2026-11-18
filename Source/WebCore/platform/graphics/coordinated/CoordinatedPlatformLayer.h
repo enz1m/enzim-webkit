@@ -52,6 +52,7 @@ namespace WebCore {
 class CoordinatedBackingStore;
 class CoordinatedBackingStoreProxy;
 class CoordinatedImageBackingStore;
+struct CoordinatedLayerChanges;
 class CoordinatedPlatformLayer;
 class CoordinatedPlatformLayerBuffer;
 class CoordinatedTileBuffer;
@@ -206,6 +207,14 @@ public:
     void flushPendingState();
     void flushPositionChanges(const OptionSet<CompositionReason>&);
     void flushCompositingState(const OptionSet<CompositionReason>&);
+#if !USE(TEXTURE_MAPPER)
+    // Records what flushPositionChanges() and flushCompositingState() would
+    // apply, for a compositor in the GPU process. Returns whether anything
+    // changed.
+    bool flushCompositingStateRemote(const OptionSet<CompositionReason>&, CoordinatedLayerChanges&);
+    // A compositor that lost this layer's state receives all of it again.
+    WEBCORE_EXPORT void markAllChangesPending();
+#endif
 
     bool hasPendingTilesCreation() const { assertIsMainThread(); return m_pendingTilesCreation; }
     bool hasPendingBackingStoreTileUpdates() const;

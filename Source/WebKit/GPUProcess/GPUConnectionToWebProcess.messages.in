@@ -61,6 +61,10 @@ messages -> GPUConnectionToWebProcess WantsDispatchMessage {
     ReleaseRemoteCommandListener(WebKit::RemoteRemoteCommandListenerIdentifier identifier)
     ReleaseTransferredImageBuffer(WebCore::ImageBufferTransferIdentifier identifier)
     ConfigureLoggingChannel(String channelName, enum:uint8_t WTFLogChannelState state, enum:uint8_t WTFLogLevel level)
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+    CreateCoordinatedCompositor(uint64_t identifier) -> ()
+    ReleaseCoordinatedCompositor(uint64_t identifier)
+#endif
 #if USE(GRAPHICS_LAYER_WC)
     CreateWCLayerTreeHost(WebKit::WCLayerTreeHostIdentifier identifier, uint64_t nativeWindow, bool usesOffscreenRendering) AllowedWhenWaitingForSyncReply
     ReleaseWCLayerTreeHost(WebKit::WCLayerTreeHostIdentifier identifier) AllowedWhenWaitingForSyncReply

@@ -39,6 +39,7 @@ Ref<CoordinatedImageBackingStore> CoordinatedImageBackingStore::create(Ref<Nativ
 CoordinatedImageBackingStore::CoordinatedImageBackingStore(Ref<NativeImage>&& nativeImage, const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext)
     : m_buffer(CoordinatedPlatformLayerBufferSkiaImage::create(nativeImage->platformImage(), threadSafeGrContext))
     , m_uniqueID(nativeImage->uniqueID())
+    , m_image(nativeImage->platformImage())
 {
 }
 

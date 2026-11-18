@@ -95,7 +95,9 @@ AcceleratedBackingStore::~AcceleratedBackingStore()
 
 void AcceleratedBackingStore::updateSurfaceID(uint64_t surfaceID)
 {
-    if (m_surfaceID == surfaceID)
+    // Surface identifiers are per web process: after a process swap the new
+    // process's surface can have the old one's identifier.
+    if (m_surfaceID == surfaceID && (!surfaceID || !m_webPage || m_legacyMainFrameProcess.get() == &m_webPage->legacyMainFrameProcess()))
         return;
 
     if (m_surfaceID) {
@@ -104,6 +106,8 @@ void AcceleratedBackingStore::updateSurfaceID(uint64_t surfaceID)
             m_pendingBuffer = nullptr;
             m_pendingDamageRects = { };
         }
+        // The previous surface's frame no longer needs its fence.
+        m_fenceMonitor.reset();
         m_buffers.clear();
         m_bufferIDs.clear();
         if (RefPtr legacyMainFrameProcess = m_legacyMainFrameProcess.get())
@@ -200,7 +204,15 @@ void AcceleratedBackingStore::didDestroyBuffer(uint64_t id)
 
 void AcceleratedBackingStore::frame(uint64_t bufferID, Rects&& damageRects, WTF::UnixFileDescriptor&& renderingFenceFD)
 {
-    ASSERT(!m_pendingBuffer);
+    // A web process sends a frame only after the previous one is done; one
+    // that does not, through a race or on purpose, replaces the frame still
+    // waiting for its fence rather than ending this process.
+    if (m_pendingBuffer) {
+        m_fenceMonitor.reset();
+        m_pendingBuffer = nullptr;
+        m_pendingDamageRects = { };
+        frameDone();
+    }
     auto* buffer = m_buffers.get(bufferID);
     if (!buffer) {
         frameDone();

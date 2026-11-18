@@ -287,9 +287,11 @@ void ProcessLauncher::launchProcess()
                 g_error("Failed to read pid from child process");
 
             m_processID = IPC::Connection::remoteProcessID(socket.get());
-            RELEASE_ASSERT(m_processID);
-
             m_socketMonitor.stop();
+            if (!m_processID) {
+                didFinishLaunchingProcess(0, { });
+                return G_SOURCE_REMOVE;
+            }
 
             didFinishLaunchingProcess(m_processID, IPC::Connection::Identifier { { g_socket_get_fd(socket.get()), UnixFileDescriptor::Duplicate } });
             return G_SOURCE_REMOVE;

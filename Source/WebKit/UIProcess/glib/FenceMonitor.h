@@ -41,6 +41,8 @@ public:
 
     void addFileDescriptor(WTF::UnixFileDescriptor&&);
     bool hasFileDescriptor() const { return !!m_fd; }
+    // Stops waiting for the current fence without calling back.
+    void reset();
 
 private:
     void ensureSource();

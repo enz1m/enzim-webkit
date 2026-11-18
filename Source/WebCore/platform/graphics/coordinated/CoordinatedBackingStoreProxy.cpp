@@ -416,7 +416,7 @@ IntSize CoordinatedBackingStoreProxy::computeTileSize(const IntSize& viewportSiz
 
     IntSize tileSize;
 #if USE(SKIA)
-    if (ProcessCapabilities::canUseAcceleratedBuffers() && PlatformDisplay::sharedDisplay().skiaGLContext()) {
+    if (ProcessCapabilities::compositesInGPUProcess() || (ProcessCapabilities::canUseAcceleratedBuffers() && PlatformDisplay::sharedDisplay().skiaGLContext())) {
 #else
     if (ProcessCapabilities::canUseAcceleratedBuffers()) {
 #endif

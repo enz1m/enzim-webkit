@@ -32,6 +32,7 @@
 #if ENABLE(VIDEO) && USE(GSTREAMER)
 #include "GStreamerCommon.h"
 #include "IntSize.h"
+#include "ProcessCapabilities.h"
 #include <glib.h>
 #include <gst/gst.h>
 #include <gst/video/gstvideometa.h>
@@ -50,7 +51,15 @@ using namespace WebCore;
 
 #define WEBKIT_VIDEO_SINK_PAD_CAPS GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_META_GST_VIDEO_GL_TEXTURE_UPLOAD_META, GST_CAPS_FORMAT) ";" GST_VIDEO_CAPS_MAKE(GST_CAPS_FORMAT)
 
-static GstStaticPadTemplate s_videoSinkTemplate = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS(WEBKIT_VIDEO_SINK_PAD_CAPS));
+#if USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+// Frames in GPU memory are accepted only when the GPU process composites; see
+// webkitVideoSinkGetCaps.
+#define WEBKIT_VIDEO_SINK_TEMPLATE_CAPS "video/x-raw(memory:DMABuf), format = (string) DMA_DRM;" WEBKIT_VIDEO_SINK_PAD_CAPS
+#else
+#define WEBKIT_VIDEO_SINK_TEMPLATE_CAPS WEBKIT_VIDEO_SINK_PAD_CAPS
+#endif
+
+static GstStaticPadTemplate s_videoSinkTemplate = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS(WEBKIT_VIDEO_SINK_TEMPLATE_CAPS));
 
 
 GST_DEBUG_CATEGORY_STATIC(webkitVideoSinkDebug);
@@ -208,6 +217,37 @@ static gboolean webkitVideoSinkStart(GstBaseSink* baseSink)
     return TRUE;
 }
 
+static GstCaps* webkitVideoSinkGetCaps(GstBaseSink*, GstCaps* filter)
+{
+    GRefPtr<GstCaps> caps = adoptGRef(gst_caps_from_string(WEBKIT_VIDEO_SINK_PAD_CAPS));
+#if USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+    // The GPU process imports decoded frames without a copy.
+    if (ProcessCapabilities::compositesInGPUProcess()) {
+        auto dmabufCaps = buildDMABufCaps();
+        gst_caps_append(dmabufCaps.get(), caps.leakRef());
+        caps = WTF::move(dmabufCaps);
+    }
+#endif
+    if (filter)
+        return gst_caps_intersect_full(filter, caps.get(), GST_CAPS_INTERSECT_FIRST);
+    return caps.leakRef();
+}
+
+static bool videoInfoFromCaps(GstVideoInfo& info, GstCaps* caps)
+{
+#if GST_CHECK_VERSION(1, 24, 0)
+    if (gst_video_is_dma_drm_caps(caps)) {
+        GstVideoInfoDmaDrm drmInfo;
+        if (!gst_video_info_dma_drm_from_caps(&drmInfo, caps))
+            return false;
+        if (!gst_video_info_dma_drm_to_video_info(&drmInfo, &info))
+            info = drmInfo.vinfo;
+        return true;
+    }
+#endif
+    return gst_video_info_from_caps(&info, caps);
+}
+
 static gboolean webkitVideoSinkSetCaps(GstBaseSink* baseSink, GstCaps* caps)
 {
     WebKitVideoSink* sink = WEBKIT_VIDEO_SINK(baseSink);
@@ -216,7 +256,7 @@ static gboolean webkitVideoSinkSetCaps(GstBaseSink* baseSink, GstCaps* caps)
     GST_DEBUG_OBJECT(sink, "Current caps %" GST_PTR_FORMAT ", setting caps %" GST_PTR_FORMAT, priv->currentCaps.get(), caps);
 
     GstVideoInfo videoInfo;
-    if (!gst_video_info_from_caps(&videoInfo, caps)) {
+    if (!videoInfoFromCaps(videoInfo, caps)) {
         GST_ERROR_OBJECT(sink, "Invalid caps %" GST_PTR_FORMAT, caps);
         return FALSE;
     }
@@ -234,7 +274,7 @@ static gboolean webkitVideoSinkProposeAllocation(GstBaseSink* baseSink, GstQuery
         return FALSE;
 
     WebKitVideoSink* sink = WEBKIT_VIDEO_SINK(baseSink);
-    if (!gst_video_info_from_caps(&sink->priv->info, caps))
+    if (!videoInfoFromCaps(sink->priv->info, caps))
         return FALSE;
 
     gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, nullptr);
@@ -275,6 +315,7 @@ static void webkit_video_sink_class_init(WebKitVideoSinkClass* klass)
     baseSinkClass->preroll = webkitVideoSinkRender;
     baseSinkClass->stop = webkitVideoSinkStop;
     baseSinkClass->start = webkitVideoSinkStart;
+    baseSinkClass->get_caps = webkitVideoSinkGetCaps;
     baseSinkClass->set_caps = webkitVideoSinkSetCaps;
     baseSinkClass->propose_allocation = webkitVideoSinkProposeAllocation;
     baseSinkClass->event = webkitVideoSinkEvent;

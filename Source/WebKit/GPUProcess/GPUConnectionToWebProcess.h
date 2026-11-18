@@ -119,6 +119,10 @@ struct GPUProcessConnectionParameters;
 struct MediaOverridesForTesting;
 struct RemoteAudioSessionConfiguration;
 
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+class CoordinatedCompositorPictureCache;
+class RemoteCoordinatedCompositor;
+#endif
 #if USE(GRAPHICS_LAYER_WC)
 class RemoteWCLayerTreeHost;
 #endif
@@ -360,6 +364,11 @@ private:
     void setMediaOverridesForTesting(MediaOverridesForTesting);
     void configureLoggingChannel(const String&, WTFLogChannelState, WTFLogLevel);
 
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+    void createCoordinatedCompositor(uint64_t, CompletionHandler<void()>&&);
+    void releaseCoordinatedCompositor(uint64_t);
+#endif
+
 #if USE(GRAPHICS_LAYER_WC)
     void createWCLayerTreeHost(WebKit::WCLayerTreeHostIdentifier, uint64_t nativeWindow, bool usesOffscreenRendering);
     void releaseWCLayerTreeHost(WebKit::WCLayerTreeHostIdentifier);
@@ -461,6 +470,11 @@ private:
 
     using RemoteAudioHardwareListenerMap = HashMap<RemoteAudioHardwareListenerIdentifier, Ref<RemoteAudioHardwareListenerProxy>>;
     RemoteAudioHardwareListenerMap m_remoteAudioHardwareListenerMap;
+
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+    HashMap<uint64_t, Ref<RemoteCoordinatedCompositor>> m_coordinatedCompositors;
+    RefPtr<CoordinatedCompositorPictureCache> m_coordinatedCompositorPictureCache;
+#endif
 
 #if USE(GRAPHICS_LAYER_WC)
     using RemoteWCLayerTreeHostMap = HashMap<WCLayerTreeHostIdentifier, Ref<RemoteWCLayerTreeHost>>;

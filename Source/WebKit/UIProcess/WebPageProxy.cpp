@@ -1903,6 +1903,7 @@ void WebPageProxy::setDrawingArea(RefPtr<DrawingAreaProxy>&& newDrawingArea)
 
     drawingArea->startReceivingMessages(legacyMainFrameProcess);
     drawingArea->setSize(viewSize());
+    drawingArea->didBecomeCurrent();
 
 #if PLATFORM(COCOA)
     if (RefPtr drawingAreaProxy = dynamicDowncast<RemoteLayerTreeDrawingAreaProxy>(*drawingArea)) {

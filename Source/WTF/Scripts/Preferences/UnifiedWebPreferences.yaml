@@ -2823,7 +2823,7 @@ HiddenPageCSSAnimationSuspensionEnabled:
   status: embedder
   webcoreOnChange: hiddenPageCSSAnimationSuspensionEnabledChanged
   defaultValue:
-    "PLATFORM(COCOA) || PLATFORM(GTK)": true
+    "PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)": true
     default: false
     WebKitLegacy: true
     WebCore: false
@@ -2833,7 +2833,9 @@ HiddenPageDOMTimerThrottlingAutoIncreases:
   status: embedder
   humanReadableName: "Hidden page DOM timer throttling auto-increases"
   webcoreOnChange: hiddenPageDOMTimerThrottlingStateChanged
-  defaultValue: false
+  defaultValue:
+    "PLATFORM(WPE)": true
+    default: false
 
 HiddenPageDOMTimerThrottlingEnabled:
   type: bool
@@ -2844,7 +2846,7 @@ HiddenPageDOMTimerThrottlingEnabled:
   defaultValue:
     default: false
     WebKit:
-      "PLATFORM(COCOA) || PLATFORM(GTK)": true
+      "PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)": true
       default: false
 
 HiddenUntilFoundEnabled:
@@ -6637,6 +6639,16 @@ UseGPUProcessForCanvasRenderingEnabled:
     "ENABLE(GPU_PROCESS_BY_DEFAULT)": true
     "USE(GRAPHICS_LAYER_WC)": true
     default: false
+
+UseGPUProcessForCompositingEnabled:
+  type: bool
+  status: internal
+  humanReadableName: "GPU Process: Compositing"
+  humanReadableDescription: "Paint tiles and composite layers in GPU Process"
+  condition: ENABLE(GPU_PROCESS) && USE(GBM) && USE(SKIA)
+  excludeFrom: [ WebKitLegacy, WebCore ]
+  defaultValue: false
+  sharedPreferenceForWebProcess: true
 
 UseGPUProcessForDOMRenderingEnabled:
   type: bool

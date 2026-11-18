@@ -112,6 +112,9 @@ public:
     virtual void viewIsBecomingVisible() { }
     virtual void viewIsBecomingInvisible() { }
 
+    // The page now shows this drawing area's process, as after a process swap.
+    virtual void didBecomeCurrent() { }
+
 #if PLATFORM(MAC)
     virtual void didChangeViewExposedRect();
     void viewExposedRectChangedTimerFired();

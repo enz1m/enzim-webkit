@@ -43,6 +43,9 @@
 #include <WebCore/PlatformDisplayGBM.h>
 #endif
 #include <WebCore/PlatformDisplaySurfaceless.h>
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+#include "RemoteCoordinatedCompositor.h"
+#endif
 #include <wtf/text/UTF8CStringView.h>
 
 namespace WebKit {
@@ -74,6 +77,11 @@ void GPUProcess::stopRunLoop()
     // are released on the WebGL work queue, then stop the queue before the display is destroyed.
     for (Ref connection : copyToVector(m_webProcessConnections.values()))
         connection->close();
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+    // Compositors release their GL resources on their queue; let them finish
+    // before the display goes away.
+    RemoteCoordinatedCompositor::waitForPendingWork();
+#endif
 #if ENABLE(WEBGL)
     remoteGraphicsContextGLStreamWorkQueueSingleton().stopAndWaitForCompletion([] {
         WebCore::GraphicsContextGLANGLE::releaseThreadResources(WebCore::GraphicsContextGLANGLE::ReleaseThreadResourceBehavior::TerminateAndReleaseThreadResources);

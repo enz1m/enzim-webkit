@@ -25,6 +25,8 @@
 
 namespace WebCore {
 
+struct CoordinatedAnimationsData;
+
 class AcceleratedAnimations {
 public:
     AcceleratedAnimations() = default;
@@ -59,6 +61,10 @@ public:
 
     bool hasActiveAnimationsOfType(AnimatedProperty) const;
     bool hasRunningTransformAnimations() const;
+
+    // For a compositor in another process.
+    CoordinatedAnimationsData data() const;
+    static AcceleratedAnimations fromData(CoordinatedAnimationsData&&);
 
 private:
     Transforms m_transforms;

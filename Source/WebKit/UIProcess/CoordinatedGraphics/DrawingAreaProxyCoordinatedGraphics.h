@@ -82,6 +82,8 @@ private:
 
     // IPC message handlers
     void enterAcceleratedCompositingMode(uint64_t backingStoreStateID, const LayerTreeContext&) override;
+    void didBecomeCurrent() override;
+    RefPtr<WebPageProxy> pageIfCurrent() const;
 #if !PLATFORM(WPE) && !PLATFORM(GTK)
     void update(uint64_t backingStoreStateID, UpdateInfo&&) override;
     void exitAcceleratedCompositingMode(uint64_t backingStoreStateID, UpdateInfo&&) override;

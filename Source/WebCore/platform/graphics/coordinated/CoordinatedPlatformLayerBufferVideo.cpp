@@ -189,6 +189,7 @@ static bool isSinglePlaneGLMemory(GstGLMemory* memory, GstVideoInfo* videoInfo, 
 
 void CoordinatedPlatformLayerBufferVideo::createSkiaImageIfNeeded(const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext, bool gstGLEnabled, Origin origin)
 {
+    m_origin = origin;
     const auto& sample = m_videoFrame->sample();
     auto* buffer = gst_sample_get_buffer(sample.get());
     auto* memory = gst_buffer_peek_memory(buffer, 0);
@@ -251,9 +252,20 @@ void CoordinatedPlatformLayerBufferVideo::createSkiaImageForDMABufMemory(const s
     if (GST_VIDEO_INFO_HAS_ALPHA(&videoInfo))
         m_alphaMode = AlphaMode::Premultiplied;
 
+    // Without a GL context the GPU process imports the frame.
+    if (!threadSafeGrContext)
+        return;
+
     auto dmabuf = m_videoFrame->getDMABuf();
     ASSERT(dmabuf);
     m_image = dmabuf->createPromiseImage(threadSafeGrContext, kRGBA_8888_SkColorType, toSkiaAlphaType(m_alphaMode), toSkiaOrigin(origin), nullptr, { });
+}
+
+RefPtr<DMABufBuffer> CoordinatedPlatformLayerBufferVideo::dmabuf() const
+{
+    if (m_image)
+        return nullptr;
+    return m_videoFrame->getDMABuf();
 }
 #endif
 #endif // USE(GBM)

@@ -29,19 +29,20 @@
 #if USE(COORDINATED_GRAPHICS) && !USE(TEXTURE_MAPPER) && USE(GBM)
 #include "DMABufBuffer.h"
 #include "GLFence.h"
+#include "ProcessCapabilities.h"
 
 namespace WebCore {
 
 std::unique_ptr<CoordinatedPlatformLayerBufferDMABuf> CoordinatedPlatformLayerBufferDMABuf::create(Ref<DMABufBuffer>&& dmabuf, AlphaMode alphaMode, Origin origin, std::unique_ptr<GLFence>&& fence, const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext)
 {
-    if (!threadSafeGrContext)
+    if (!threadSafeGrContext && !ProcessCapabilities::compositesInGPUProcess())
         return nullptr;
     return makeUnique<CoordinatedPlatformLayerBufferDMABuf>(WTF::move(dmabuf), alphaMode, origin, WTF::move(fence), threadSafeGrContext);
 }
 
 std::unique_ptr<CoordinatedPlatformLayerBufferDMABuf> CoordinatedPlatformLayerBufferDMABuf::create(Ref<DMABufBuffer>&& dmabuf, AlphaMode alphaMode, Origin origin, UnixFileDescriptor&& fenceFD, const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext)
 {
-    if (!threadSafeGrContext)
+    if (!threadSafeGrContext && !ProcessCapabilities::compositesInGPUProcess())
         return nullptr;
     return makeUnique<CoordinatedPlatformLayerBufferDMABuf>(WTF::move(dmabuf), alphaMode, origin, WTF::move(fenceFD), threadSafeGrContext);
 }
@@ -64,6 +65,18 @@ CoordinatedPlatformLayerBufferDMABuf::~CoordinatedPlatformLayerBufferDMABuf() = 
 
 void CoordinatedPlatformLayerBufferDMABuf::initializeSkiaImage(const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext, Origin origin, std::unique_ptr<GLFence>&& fence, UnixFileDescriptor&& fenceFD)
 {
+    m_origin = origin;
+    if (!threadSafeGrContext) {
+        // The GPU process imports the buffer; it waits for the fence there,
+        // or the rendering is finished here first.
+        if (fence) {
+            fenceFD = fence->exportFD();
+            if (!fenceFD)
+                fence->clientWait();
+        }
+        m_fenceFD = WTF::move(fenceFD);
+        return;
+    }
     m_image = m_dmabuf->createPromiseImage(threadSafeGrContext, kRGBA_8888_SkColorType, toSkiaAlphaType(m_alphaMode), toSkiaOrigin(origin), WTF::move(fence), WTF::move(fenceFD));
 }
 

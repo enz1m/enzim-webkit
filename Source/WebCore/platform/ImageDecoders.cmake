@@ -49,7 +49,11 @@ if (USE_CAIRO)
         platform/image-decoders/cairo/ImageBackingStoreCairo.cpp
     )
 elseif (USE_SKIA)
+    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+        "${WEBCORE_DIR}/platform/image-decoders/skia"
+    )
     list(APPEND WebCore_SOURCES
+        platform/image-decoders/skia/EncodedImageGenerator.cpp
         platform/image-decoders/skia/ImageBackingStoreSkia.cpp
     )
 endif ()

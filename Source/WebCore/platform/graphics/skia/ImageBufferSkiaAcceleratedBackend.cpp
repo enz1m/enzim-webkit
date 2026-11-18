@@ -196,6 +196,10 @@ std::unique_ptr<ImageBufferSkiaAcceleratedBackend> ImageBufferSkiaAcceleratedBac
     if (parameters.purpose != RenderingPurpose::Canvas && !ProcessCapabilities::canUseAcceleratedBuffers())
         return nullptr;
 
+    // Without a GL context of its own the process renders canvases on the CPU.
+    if (ProcessCapabilities::compositesInGPUProcess())
+        return nullptr;
+
 #if !PLATFORM(WIN)
     if (!PlatformDisplay::sharedDisplayIfExists())
         return nullptr;

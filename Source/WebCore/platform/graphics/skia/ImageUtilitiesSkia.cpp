@@ -139,8 +139,11 @@ Vector<uint8_t> platformEncodeData(const NativeImage& nativeImage, const String&
         return unsafeMakeSpan(reinterpret_cast<const uint8_t*>(data->data()), data->size());
     }
 
+    // A still image the GPU process decodes is decoded here when asked.
+    if (image->isLazyGenerated())
+        image = image->makeRasterImage(nullptr);
     SkPixmap pixmap;
-    if (!image->peekPixels(&pixmap))
+    if (!image || !image->peekPixels(&pixmap))
         return { };
 
     return encodeUnacceleratedImage(pixmap, mimeType, quality);

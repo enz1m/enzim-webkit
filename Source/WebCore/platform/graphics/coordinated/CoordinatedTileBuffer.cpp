@@ -38,6 +38,7 @@
 #include "GLFence.h"
 #include "PlatformDisplay.h"
 #include "ProcessCapabilities.h"
+#include "SkiaRecordingResult.h"
 #include "SkiaUtilities.h"
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkColorSpace.h>
@@ -247,6 +248,22 @@ CoordinatedAcceleratedTileBuffer::CoordinatedAcceleratedTileBuffer(GrSurfaceChar
 #endif
 
 CoordinatedAcceleratedTileBuffer::~CoordinatedAcceleratedTileBuffer() = default;
+
+Ref<CoordinatedTileBuffer> CoordinatedRecordedTileBuffer::create(Ref<SkiaRecordingResult>&& recording, const IntSize& size, Flags flags)
+{
+    return adoptRef(*new CoordinatedRecordedTileBuffer(WTF::move(recording), size, flags));
+}
+
+CoordinatedRecordedTileBuffer::CoordinatedRecordedTileBuffer(Ref<SkiaRecordingResult>&& recording, const IntSize& size, Flags flags)
+    : CoordinatedTileBuffer(flags)
+    , m_recording(WTF::move(recording))
+    , m_size(size)
+{
+    didBeginPainting();
+    didCompletePainting();
+}
+
+CoordinatedRecordedTileBuffer::~CoordinatedRecordedTileBuffer() = default;
 
 IntSize CoordinatedAcceleratedTileBuffer::size() const
 {

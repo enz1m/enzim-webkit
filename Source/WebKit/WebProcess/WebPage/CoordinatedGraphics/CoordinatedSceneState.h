@@ -27,6 +27,7 @@
 
 #if USE(COORDINATED_GRAPHICS)
 #include <WebCore/CoordinatedCompositionReason.h>
+#include <WebCore/PlatformLayerIdentifier.h>
 #include <atomic>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
@@ -34,6 +35,7 @@
 
 namespace WebCore {
 class CoordinatedPlatformLayer;
+struct CoordinatedLayerChanges;
 }
 
 namespace WebKit {
@@ -56,6 +58,14 @@ public:
     bool flush();
     void flushPendingState();
     void flushCompositingState(const OptionSet<WebCore::CompositionReason>&);
+#if !USE(TEXTURE_MAPPER)
+    // Records the layer changes and removed layers for a compositor in the
+    // GPU process instead of applying them.
+    // Marks every layer's state as changed and drops their tiles, so that a
+    // new compositor in the GPU process receives all of it again.
+    void resendToRemoteCompositor();
+    void flushCompositingStateRemote(const OptionSet<WebCore::CompositionReason>&, Vector<WebCore::CoordinatedLayerChanges>&, Vector<WebCore::PlatformLayerIdentifier>& removedLayers);
+#endif
     void invalidate();
 
     void invalidateCommittedLayers();

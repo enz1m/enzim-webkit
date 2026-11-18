@@ -209,6 +209,7 @@ def types_that_must_be_moved():
         'HashMap<WebKit::ImageBufferSetIdentifier, std::unique_ptr<WebKit::BufferSetBackendHandle>>',
         'WebCore::DMABufBufferAttributes',
         'std::optional<WebCore::DMABufBufferAttributes>',
+        'WebKit::CoordinatedCompositorFrame',
         'WebCore::DocumentSyncSerializationData',
         'WebCore::FrameTreeSyncSerializationData',
     ]

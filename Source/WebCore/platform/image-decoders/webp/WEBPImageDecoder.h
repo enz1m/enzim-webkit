@@ -47,6 +47,7 @@ public:
     String filenameExtension() const override { return "webp"_s; }
     void setData(const FragmentedSharedBuffer&, bool) final;
     ScalableImageDecoderFrame* frameBufferAtIndex(size_t index) override;
+    bool supportsDeferredDecoding() const final { return true; }
     RepetitionCount repetitionCount() const override;
     size_t decodeIfNeededAndGetFrameCount() const override { return m_frameCount; }
     void clearDecodedPixelDataIfNeeded(size_t) override;

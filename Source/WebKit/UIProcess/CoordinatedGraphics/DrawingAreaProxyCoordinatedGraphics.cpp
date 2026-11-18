@@ -253,7 +253,7 @@ void DrawingAreaProxyCoordinatedGraphics::enterAcceleratedCompositingMode(const 
     m_backingStore = nullptr;
 #endif
     m_layerTreeContext = layerTreeContext;
-    if (RefPtr page = this->page())
+    if (RefPtr page = pageIfCurrent())
         page->enterAcceleratedCompositingMode(layerTreeContext);
 }
 
@@ -262,8 +262,25 @@ void DrawingAreaProxyCoordinatedGraphics::exitAcceleratedCompositingMode()
     ASSERT(isInAcceleratedCompositingMode());
 
     m_layerTreeContext = { };
-    if (RefPtr page = this->page())
+    if (RefPtr page = pageIfCurrent())
         page->exitAcceleratedCompositingMode();
+}
+
+// A provisional page's drawing area, and the one it replaces while it is torn
+// down, must not change what the page shows: the provisional page's surface
+// takes over when it becomes current.
+RefPtr<WebPageProxy> DrawingAreaProxyCoordinatedGraphics::pageIfCurrent() const
+{
+    RefPtr page = this->page();
+    if (!page || (page->drawingArea() && page->drawingArea() != this))
+        return nullptr;
+    return page;
+}
+
+void DrawingAreaProxyCoordinatedGraphics::didBecomeCurrent()
+{
+    if (RefPtr page = this->page(); page && isInAcceleratedCompositingMode())
+        page->enterAcceleratedCompositingMode(m_layerTreeContext);
 }
 
 void DrawingAreaProxyCoordinatedGraphics::updateAcceleratedCompositingMode(const LayerTreeContext& layerTreeContext)
@@ -271,7 +288,7 @@ void DrawingAreaProxyCoordinatedGraphics::updateAcceleratedCompositingMode(const
     ASSERT(isInAcceleratedCompositingMode());
 
     m_layerTreeContext = layerTreeContext;
-    if (RefPtr page = this->page())
+    if (RefPtr page = pageIfCurrent())
         page->updateAcceleratedCompositingMode(layerTreeContext);
 }
 

@@ -517,6 +517,11 @@ void GPUProcessProxy::getLaunchOptions(ProcessLauncher::LaunchOptions& launchOpt
 {
     launchOptions.processType = ProcessLauncher::ProcessType::GPU;
     AuxiliaryProcessProxy::getLaunchOptions(launchOptions);
+#if USE(GLIB)
+    // The GPU process runs commands from web content, so it gets a sandbox
+    // like the web process.
+    launchOptions.extraInitializationData.set("enable-sandbox"_s, "true"_s);
+#endif
 }
 
 void GPUProcessProxy::connectionWillOpen(IPC::Connection&)

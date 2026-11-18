@@ -164,6 +164,10 @@
 #include <WebCore/SecurityOrigin.h>
 #endif
 
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+#include "RemoteCoordinatedCompositor.h"
+#endif
+
 #if USE(GRAPHICS_LAYER_WC)
 #include "RemoteWCLayerTreeHost.h"
 #include "WCContentBufferManager.h"
@@ -440,6 +444,10 @@ void GPUConnectionToWebProcess::didClose(IPC::Connection& connection)
     protect(videoFrameObjectHeap())->close();
     protect(remoteMediaPlayerManagerProxy())->connectionToWebProcessClosed();
 #endif
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+    for (auto& compositor : std::exchange(m_coordinatedCompositors, { }).values())
+        compositor->stopListeningForIPC();
+#endif
     // RemoteGPU objects maintains ref to RemoteRenderingBackend objects so drop them first.
     m_remoteGPUMap.clear();
     // RemoteRenderingBackend objects ref their GPUConnectionToWebProcess so we need to make sure
@@ -518,6 +526,25 @@ void GPUConnectionToWebProcess::configureLoggingChannel(const String& channelNam
     UNUSED_PARAM(level);
 #endif
 }
+
+#if USE(COORDINATED_GRAPHICS) && USE(SKIA)
+void GPUConnectionToWebProcess::createCoordinatedCompositor(uint64_t identifier, CompletionHandler<void()>&& completionHandler)
+{
+    // The reply tells the web process that the compositor receives messages.
+    if (identifier && !m_coordinatedCompositors.contains(identifier)) {
+        if (!m_coordinatedCompositorPictureCache)
+            m_coordinatedCompositorPictureCache = CoordinatedCompositorPictureCache::create();
+        m_coordinatedCompositors.add(identifier, RemoteCoordinatedCompositor::create(connection(), identifier, *m_coordinatedCompositorPictureCache));
+    }
+    completionHandler();
+}
+
+void GPUConnectionToWebProcess::releaseCoordinatedCompositor(uint64_t identifier)
+{
+    if (auto compositor = m_coordinatedCompositors.take(identifier))
+        compositor->stopListeningForIPC();
+}
+#endif
 
 #if USE(GRAPHICS_LAYER_WC)
 void GPUConnectionToWebProcess::createWCLayerTreeHost(WebKit::WCLayerTreeHostIdentifier identifier, uint64_t nativeWindow, bool usesOffscreenRendering)

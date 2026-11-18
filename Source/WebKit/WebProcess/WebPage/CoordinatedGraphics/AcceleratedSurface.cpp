@@ -42,6 +42,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <wtf/SafeStrerror.h>
+#include <wtf/threads/BinarySemaphore.h>
+#include <wtf/WorkQueue.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/SystemTracing.h>
 #include <wtf/TZoneMallocInlines.h>
 
@@ -56,6 +59,11 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #if PLATFORM(GTK) || ENABLE(WPE_PLATFORM)
 #include "AcceleratedBackingStoreMessages.h"
 #include "AcceleratedSurfaceMessages.h"
+#if ENABLE(GPU_PROCESS) && !USE(TEXTURE_MAPPER)
+#include "CoordinatedCompositorFrame.h"
+#include "RemoteCoordinatedCompositorMessages.h"
+#include <WebCore/SkiaRemotePicture.h>
+#endif
 #include <WebCore/DMABufBuffer.h>
 #include <epoxy/egl.h>
 #endif
@@ -317,6 +325,13 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
         return nullptr;
     }
 
+#if ENABLE(GPU_PROCESS) && !USE(TEXTURE_MAPPER)
+    if (surface.compositesRemotely()) {
+        gbm_bo_destroy(bo);
+        return makeUnique<RenderTargetRemote>(surface, size, WTF::move(*dmaBufAttributes), bufferFormat.usage);
+    }
+#endif
+
     auto& display = PlatformDisplay::sharedDisplay();
     auto image = DMABufBuffer::createEGLImage(display.glDisplay(), *dmaBufAttributes);
     gbm_bo_destroy(bo);
@@ -336,6 +351,32 @@ AcceleratedSurface::RenderTargetEGLImage::RenderTargetEGLImage(AcceleratedSurfac
     WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateDMABufBuffer(m_id, WTF::move(dmaBufAttributes), usage), m_surface->surfaceID());
 }
 #endif // USE(GBM)
+
+#if ENABLE(GPU_PROCESS) && !USE(TEXTURE_MAPPER)
+AcceleratedSurface::RenderTargetRemote::RenderTargetRemote(AcceleratedSurface& surface, const IntSize& size, DMABufBufferAttributes&& attributes, RendererBufferFormat::Usage usage)
+    : RenderTarget(surface, size)
+{
+    DMABufBufferAttributes attributesForCompositor {
+        attributes.size, attributes.fourcc,
+        WTF::map(attributes.fds, [](const auto& fd) { return fd.duplicate(); }),
+        attributes.offsets, attributes.strides, attributes.modifier
+    };
+    m_surface->m_remoteCompositor.connection->send(Messages::RemoteCoordinatedCompositor::RegisterBuffer(m_id, WTF::move(attributesForCompositor)), m_surface->m_remoteCompositor.identifier);
+    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateDMABufBuffer(m_id, WTF::move(attributes), usage), m_surface->surfaceID());
+}
+
+AcceleratedSurface::RenderTargetRemote::~RenderTargetRemote()
+{
+    if (m_surface->m_remoteCompositor.isReady)
+        m_surface->m_remoteCompositor.connection->send(Messages::RemoteCoordinatedCompositor::UnregisterBuffer(m_id), m_surface->m_remoteCompositor.identifier);
+    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidDestroyBuffer(m_id), m_surface->surfaceID());
+}
+
+void AcceleratedSurface::RenderTargetRemote::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
+{
+    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::Frame(m_id, WTF::move(damageRects), WTF::move(m_renderingFenceFD)), m_surface->surfaceID());
+}
+#endif
 
 #if OS(ANDROID)
 static uint64_t usageToAHardwareBufferUsage(RendererBufferFormat::Usage usage)
@@ -1159,6 +1200,87 @@ void AcceleratedSurface::clear(const OptionSet<WebCore::CompositionReason>& reas
 }
 #endif
 
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+static WorkQueue& remoteCompositorReplyQueue()
+{
+    static NeverDestroyed<Ref<WorkQueue>> queue = WorkQueue::create("org.webkit.GPUCompositorReplies"_s);
+    return queue.get();
+}
+
+void AcceleratedSurface::setRemoteCompositor(Ref<IPC::Connection>&& connection, uint64_t identifier)
+{
+    m_remoteCompositor.connection = WTF::move(connection);
+    m_remoteCompositor.identifier = identifier;
+}
+
+void AcceleratedSurface::reconnectRemoteCompositor(Ref<IPC::Connection>&& connection)
+{
+    // The old buffers die with the old GPU process; the new one never heard
+    // of them.
+    m_remoteCompositor.isReady = false;
+    m_remoteCompositor.connection = WTF::move(connection);
+    m_target = nullptr;
+    m_swapChain.reset();
+#if ENABLE(DAMAGE_TRACKING)
+    m_damageTracker.reset();
+#endif
+}
+
+std::optional<bool> AcceleratedSurface::renderFrameRemotely(CoordinatedCompositorFrame&& frame)
+{
+    if (!m_target || !compositesRemotely())
+        return std::nullopt;
+
+    frame.bufferID = m_target->id();
+    frame.paintsMirrored = shouldPaintMirrored();
+    frame.releaseFence = m_target->takeReleaseFenceFD();
+    // The reply arrives on its own queue: the main thread may be waiting for
+    // this thread. A frame takes milliseconds; one that has not come back in a
+    // second will not, as when the GPU process is going away.
+    struct Reply {
+        BinarySemaphore semaphore;
+        UnixFileDescriptor renderingFence;
+        bool hasRunningAnimations { false };
+        bool rendered { false };
+    };
+    auto reply = std::make_shared<Reply>();
+    m_remoteCompositor.connection->sendWithAsyncReplyOnDispatcher(Messages::RemoteCoordinatedCompositor::RenderFrame(WTF::move(frame)), remoteCompositorReplyQueue(), [reply](UnixFileDescriptor&& renderingFence, bool hasRunningAnimations, bool rendered, Vector<uint32_t>&& evictedImages) {
+        SkiaPictureSerializer::singleton().forgetImages(evictedImages);
+        reply->renderingFence = WTF::move(renderingFence);
+        reply->hasRunningAnimations = hasRunningAnimations;
+        reply->rendered = rendered;
+        reply->semaphore.signal();
+    }, m_remoteCompositor.identifier);
+    if (!reply->semaphore.waitFor(1_s) || !reply->rendered) {
+        WTFLogAlways("GPU process compositing: frame for surface %llu was not rendered", static_cast<unsigned long long>(m_id));
+        return std::nullopt;
+    }
+
+    m_target->setRenderingFenceFD(WTF::move(reply->renderingFence));
+    return reply->hasRunningAnimations;
+}
+#endif
+
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+void AcceleratedSurface::releaseMemoryRemotely(CoordinatedCompositorFrame&& frame, bool critical)
+{
+    if (!compositesRemotely() || !m_remoteCompositor.isReady)
+        return;
+    m_remoteCompositor.connection->sendWithAsyncReplyOnDispatcher(Messages::RemoteCoordinatedCompositor::ReleaseMemory(WTF::move(frame), critical), remoteCompositorReplyQueue(), [](Vector<uint32_t>&& evictedImages) {
+        SkiaPictureSerializer::singleton().forgetImages(evictedImages);
+    }, m_remoteCompositor.identifier);
+}
+
+void AcceleratedSurface::discardFrame()
+{
+    if (!m_target)
+        return;
+    auto targetID = m_target->id();
+    m_target = nullptr;
+    m_swapChain.releaseTarget(targetID, { });
+}
+#endif
+
 void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
 {
 #if PLATFORM(GTK) || PLATFORM(WPE)
@@ -1168,7 +1290,7 @@ void AcceleratedSurface::didRenderFrame(TargetContents targetContents)
     if (!m_target)
         return;
 
-    if (usesGL())
+    if (usesGL() && !compositesRemotely())
         m_target->sync(m_useExplicitSync);
 
     Vector<IntRect, 1> damageRects;
@@ -1191,6 +1313,10 @@ void AcceleratedSurface::sendFrame()
 
     auto [target, damageRects] = m_pendingFrameNotifyTargets.takeLast();
     target->sendFrame(WTF::move(damageRects));
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (compositesRemotely())
+        m_remoteCompositor.framesInFlight++;
+#endif
 }
 
 #if ENABLE(DAMAGE_TRACKING)
@@ -1215,6 +1341,13 @@ void AcceleratedSurface::releaseBuffer(uint64_t targetID, UnixFileDescriptor&& r
 
 void AcceleratedSurface::frameDone()
 {
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (compositesRemotely()) {
+        if (!m_remoteCompositor.framesInFlight)
+            return;
+        m_remoteCompositor.framesInFlight--;
+    }
+#endif
     if (m_frameCompleteHandler)
         m_frameCompleteHandler();
 }

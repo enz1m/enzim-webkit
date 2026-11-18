@@ -29,6 +29,9 @@
 #if USE(COORDINATED_GRAPHICS)
 #include "AcceleratedSurface.h"
 #include "CoordinatedSceneState.h"
+#include "CoordinatedCompositorFrame.h"
+#include "GPUConnectionToWebProcessMessages.h"
+#include "GPUProcessConnection.h"
 #include "LayerTreeHost.h"
 #include "RenderProcessInfo.h"
 #include "WebPage.h"
@@ -38,6 +41,8 @@
 #include <WebCore/FontCache.h>
 #include <WebCore/Page.h>
 #include <WebCore/PlatformDisplay.h>
+#include <WebCore/ProcessCapabilities.h>
+#include <WebCore/SkiaRemotePicture.h>
 #include <WebCore/Settings.h>
 #include <WebCore/SkiaCompositingLayer.h>
 #include <WebCore/SkiaDamageRegion.h>
@@ -112,6 +117,16 @@ ThreadedCompositor::ThreadedCompositor(WebPage& webPage, LayerTreeHost& layerTre
 
     m_surface->didCreateCompositingRunLoop(m_workQueue->runLoop());
 
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (ProcessCapabilities::compositesInGPUProcess()) {
+        // The GPU process paints and composites; this process needs no GL
+        // context. Tiles larger than this are split anyway.
+        m_maxTextureSize = 8192;
+        m_surface->setRemoteCompositor(connectToRemoteCompositor(), m_surface->surfaceID());
+        return;
+    }
+#endif
+
     m_workQueue->dispatchSync([this] {
         // GLNativeWindowType depends on the EGL implementation: reinterpret_cast works
         // for pointers (only if they are 64-bit wide and not for other cases), and static_cast for
@@ -162,6 +177,21 @@ void ThreadedCompositor::invalidate()
     }
 
     m_didCompositeRunLoopObserver->invalidate();
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (m_surface->compositesRemotely()) {
+        m_workQueue->dispatchSync([this] {
+            m_sceneState->invalidateCommittedLayers();
+            m_surface->willDestroyGLContext();
+        });
+        if (RefPtr connection = WebProcess::singleton().existingGPUProcessConnection())
+            connection->connection().send(Messages::GPUConnectionToWebProcess::ReleaseCoordinatedCompositor(m_surface->surfaceID()), 0);
+        m_sceneState = nullptr;
+        m_layerTreeHost = nullptr;
+        m_surface->willDestroyCompositingRunLoop();
+        m_surface = nullptr;
+        return;
+    }
+#endif
     m_workQueue->dispatchSync([this] {
 #if USE(TEXTURE_MAPPER)
         if (!m_context || !m_context->makeContextCurrent())
@@ -606,6 +636,13 @@ void ThreadedCompositor::renderLayerTree()
     TransformationMatrix viewportTransform;
     viewportTransform.scale(deviceScaleFactor);
 
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (m_surface->compositesRemotely()) {
+        renderLayerTreeRemotely(reasons, viewportSize, deviceScaleFactor, shouldNotifiyDidComposite);
+        return;
+    }
+#endif
+
     m_surface->willRenderFrame(viewportSize);
 
     RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
@@ -643,6 +680,109 @@ void ThreadedCompositor::renderLayerTree()
             m_layerTreeHost->didRenderFrame();
     });
 }
+
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+Ref<IPC::Connection> ThreadedCompositor::connectToRemoteCompositor()
+{
+    ASSERT(RunLoop::isMain());
+    Ref gpuProcessConnection = WebProcess::singleton().ensureGPUProcessConnection();
+    gpuProcessConnection->addClient(*this);
+    Ref connection = gpuProcessConnection->connection();
+    // A GPU process that is still starting must not block this thread: the
+    // UI process would find the page unresponsive.
+    connection->sendWithAsyncReply(Messages::GPUConnectionToWebProcess::CreateCoordinatedCompositor(m_surface->surfaceID()), [weakThis = ThreadSafeWeakPtr { *this }, connection] {
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis)
+            return;
+        protectedThis->m_workQueue->dispatch([protectedThis, connection] {
+            if (!protectedThis->m_surface || !protectedThis->m_surface->usesRemoteConnection(connection.get()))
+                return;
+            protectedThis->m_surface->remoteCompositorIsReady();
+            // Only a composition the page asked for: a page that has not
+            // committed its navigation yet is not shown, and a frame it sent
+            // would not be answered.
+            if (std::exchange(protectedThis->m_remoteCompositionDeferred, false))
+                protectedThis->requestComposition(CompositionReason::RenderingUpdate);
+        });
+    }, 0);
+    return connection;
+}
+
+void ThreadedCompositor::gpuProcessConnectionDidClose(GPUProcessConnection&)
+{
+    // The relaunched GPU process knows nothing of this page: everything is
+    // sent again, starting with its swap chain buffers.
+    RunLoop::mainSingleton().dispatch([weakThis = ThreadSafeWeakPtr { *this }] {
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis || !protectedThis->m_surface || !protectedThis->m_sceneState)
+            return;
+        Ref connection = protectedThis->connectToRemoteCompositor();
+        protectedThis->m_workQueue->dispatchSync([&] {
+            protectedThis->m_surface->reconnectRemoteCompositor(WTF::move(connection));
+            SkiaPictureSerializer::singleton().reset();
+        });
+        protectedThis->m_sceneState->resendToRemoteCompositor();
+        if (protectedThis->m_layerTreeHost)
+            static_cast<FrameRenderer&>(*protectedThis->m_layerTreeHost).scheduleRenderingUpdate();
+    });
+}
+
+void ThreadedCompositor::renderLayerTreeRemotely(const OptionSet<CompositionReason>& reasons, const IntSize& viewportSize, float deviceScaleFactor, bool shouldNotifyDidComposite)
+{
+    if (!m_surface->isRemoteCompositorReady()) {
+        // The GPU process is starting. The changes stay pending in the layers
+        // and go out with the composition requested once it is ready.
+        m_remoteCompositionDeferred = true;
+        if (shouldNotifyDidComposite)
+            m_didCompositeRunLoopObserver->schedule(&RunLoop::mainSingleton());
+        frameComplete();
+        return;
+    }
+
+    m_surface->willRenderFrame(viewportSize);
+
+    RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
+        if (m_layerTreeHost)
+            m_layerTreeHost->willRenderFrame();
+    });
+
+    CoordinatedCompositorFrame frame { m_sceneState->rootLayer().id() };
+    frame.viewportSize = viewportSize;
+    frame.deviceScaleFactor = deviceScaleFactor;
+    if (auto clearColor = m_surface->skiaClearColor(reasons))
+        frame.clearColor = *clearColor;
+    if (!(reasons.hasExactlyOneBitSet() && reasons.contains(CompositionReason::Animation)))
+        m_sceneState->flushCompositingStateRemote(reasons, frame.layers, frame.removedLayers);
+
+    auto hasRunningAnimations = m_surface->renderFrameRemotely(WTF::move(frame));
+
+    if (shouldNotifyDidComposite)
+        m_didCompositeRunLoopObserver->schedule(&RunLoop::mainSingleton());
+
+    if (!hasRunningAnimations) {
+        // The GPU process rendered nothing, as while it relaunches; the
+        // buffer holds no frame and the next composition is allowed at once.
+        m_surface->discardFrame();
+        frameComplete();
+        RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
+            if (m_layerTreeHost)
+                m_layerTreeHost->didRenderFrame();
+        });
+        return;
+    }
+
+    m_surface->didRenderFrame(TargetContents::Valid);
+    m_surface->sendFrame();
+
+    if (hasRunningAnimations.value_or(false))
+        requestComposition(CompositionReason::Animation);
+
+    RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
+        if (m_layerTreeHost)
+            m_layerTreeHost->didRenderFrame();
+    });
+}
+#endif
 
 void ThreadedCompositor::requestCompositionForRenderingUpdate(Function<void()>&& didCompositeFunction)
 {
@@ -943,6 +1083,26 @@ static void nudgeDriverToReturnFreedMemory(GLContext& context, bool emptyCache)
 
 void ThreadedCompositor::releaseMemory(WTF::Critical critical)
 {
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (m_surface->compositesRemotely()) {
+        // The GPU process holds the tiles: send the removals and let it free
+        // what it no longer uses.
+        m_workQueue->dispatchSync([protectedThis = Ref { *this }, critical] {
+            {
+                Locker locker { protectedThis->m_state.lock };
+                if (protectedThis->m_state.state == State::Invalidated)
+                    return;
+            }
+            CoordinatedCompositorFrame frame { protectedThis->m_sceneState->rootLayer().id() };
+            protectedThis->m_sceneState->flushCompositingStateRemote(CompositionReason::RenderingUpdate, frame.layers, frame.removedLayers);
+            protectedThis->m_surface->releaseMemoryRemotely(WTF::move(frame), critical == WTF::Critical::Yes);
+            if (critical == WTF::Critical::Yes && protectedThis->m_suspendedCount > 0)
+                protectedThis->m_surface->releaseUnusedBuffersWhileHidden();
+        });
+        return;
+    }
+#endif
+
     // A suspended compositor does not render, so it applies tile removals here
     // for their textures to be freed below.
     bool applyTileRemovals = m_suspendedCount > 0;

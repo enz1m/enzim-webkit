@@ -27,6 +27,7 @@
 #include "CoordinatedSceneState.h"
 
 #if USE(COORDINATED_GRAPHICS)
+#include <WebCore/CoordinatedLayerChanges.h>
 #include <WebCore/CoordinatedPlatformLayer.h>
 #include <wtf/MainThread.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -146,6 +147,49 @@ void CoordinatedSceneState::flushCompositingState(const OptionSet<CompositionRea
 
     for (auto& layer : layersWithPendingTileUpdates)
         layer->processPendingBackingStoreTileUpdates();
+}
+
+#if !USE(TEXTURE_MAPPER)
+void CoordinatedSceneState::flushCompositingStateRemote(const OptionSet<CompositionReason>& reasons, Vector<CoordinatedLayerChanges>& changes, Vector<PlatformLayerIdentifier>& removedLayers)
+{
+    ASSERT(!isMainRunLoop());
+    {
+        Locker pendingLayersLock { m_pendingLayersLock };
+        while (!m_pendingLayersToRemove.isEmpty()) {
+            auto layer = m_pendingLayersToRemove.takeAny();
+            removedLayers.append(layer->id());
+            layer->invalidateTarget();
+        }
+        if (!m_pendingLayers.isEmpty())
+            m_committedLayers = WTF::move(m_pendingLayers);
+    }
+
+    Locker stateLock { m_stateLock };
+    auto flush = [&](CoordinatedPlatformLayer& layer) {
+        CoordinatedLayerChanges layerChanges { layer.id() };
+        if (layer.flushCompositingStateRemote(reasons, layerChanges))
+            changes.append(WTF::move(layerChanges));
+    };
+    flush(m_rootLayer);
+    for (auto& layer : m_committedLayers)
+        flush(layer);
+}
+#endif
+
+void CoordinatedSceneState::resendToRemoteCompositor()
+{
+    ASSERT(isMainRunLoop());
+    HashSet<Ref<CoordinatedPlatformLayer>> layers;
+    {
+        Locker locker { m_layersLock };
+        layers = m_layers;
+    }
+    m_rootLayer->markAllChangesPending();
+    for (Ref layer : layers) {
+        layer->markAllChangesPending();
+        layer->discardTiles();
+    }
+    m_didChangeLayers = true;
 }
 
 void CoordinatedSceneState::invalidateCommittedLayers()

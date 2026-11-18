@@ -35,6 +35,7 @@ static bool s_AVIFDecodingEnabled = false;
 
 static bool s_hardwareAcceleratedDecodingDisabled = false;
 static bool s_canUseAcceleratedBuffers = true;
+static bool s_compositesInGPUProcess = false;
 
 #if USE(CG)
 void ProcessCapabilities::setHEICDecodingEnabled(bool value)
@@ -76,6 +77,16 @@ void ProcessCapabilities::setCanUseAcceleratedBuffers(bool value)
 bool ProcessCapabilities::canUseAcceleratedBuffers()
 {
     return s_canUseAcceleratedBuffers;
+}
+
+void ProcessCapabilities::setCompositesInGPUProcess(bool value)
+{
+    s_compositesInGPUProcess = value;
+}
+
+bool ProcessCapabilities::compositesInGPUProcess()
+{
+    return s_compositesInGPUProcess;
 }
 
 } // namespace WebCore

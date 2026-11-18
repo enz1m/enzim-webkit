@@ -24,6 +24,7 @@
 #include "ScalableImageDecoder.h"
 
 #include "NotImplemented.h"
+#include "ProcessCapabilities.h"
 #include "SharedBuffer.h"
 #include <wtf/TZoneMallocInlines.h>
 
@@ -40,6 +41,10 @@
 #endif
 #if USE(JPEGXL)
 #include "JPEGXLImageDecoder.h"
+#endif
+
+#if USE(SKIA)
+#include "EncodedImageGenerator.h"
 #endif
 
 #if USE(CG)
@@ -180,6 +185,8 @@ RefPtr<ScalableImageDecoder> ScalableImageDecoder::create(FragmentedSharedBuffer
 bool ScalableImageDecoder::frameIsCompleteAtIndex(size_t index) const
 {
     Locker locker { m_lock };
+    if (!index && m_hasDeferredFrame)
+        return true;
     if (index >= m_frameBufferCache.size())
         return false;
 
@@ -190,6 +197,9 @@ bool ScalableImageDecoder::frameIsCompleteAtIndex(size_t index) const
 bool ScalableImageDecoder::frameHasAlphaAtIndex(size_t index) const
 {
     Locker locker { m_lock };
+    // Not known before decoding.
+    if (!index && m_hasDeferredFrame)
+        return true;
     if (m_frameBufferCache.size() <= index)
         return true;
 
@@ -219,12 +229,43 @@ Seconds ScalableImageDecoder::frameDurationAtIndex(size_t index) const
     return duration;
 }
 
-PlatformImagePtr ScalableImageDecoder::createFrameImageAtIndex(size_t index, SubsamplingLevel, const DecodingOptions&)
+bool ScalableImageDecoder::shouldDeferDecoding(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options) const
+{
+    // The GPU process decodes the first frame of a complete still image with
+    // the default options. Decoders here ignore a size for drawing.
+    if (m_decodesImmediately || !ProcessCapabilities::compositesInGPUProcess() || !supportsDeferredDecoding())
+        return false;
+    if (index || subsamplingLevel != SubsamplingLevel::Default || options.decodingDestination() != DecodingDestination::Base)
+        return false;
+    if (!m_premultiplyAlpha || m_ignoreGammaAndColorProfile || m_encodedDataStatus != EncodedDataStatus::Complete || !m_data)
+        return false;
+    if (decodeIfNeededAndGetFrameCount() != 1)
+        return false;
+    // A frame decoded already is used as it is; one decoded in part while
+    // the data arrived is dropped.
+    return m_frameBufferCache.isEmpty() || !m_frameBufferCache[0].isComplete();
+}
+
+PlatformImagePtr ScalableImageDecoder::createFrameImageAtIndex(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options)
 {
     Locker locker { m_lock };
     // Zero-height images can cause problems for some ports. If we have an empty image dimension, just bail.
     if (size().isEmpty())
         return nullptr;
+
+#if USE(SKIA)
+    if (shouldDeferDecoding(index, subsamplingLevel, options)) {
+        if (auto image = EncodedImageGenerator::createImage(Ref { *m_data }, size())) {
+            if (!m_frameBufferCache.isEmpty())
+                m_frameBufferCache[0].clear();
+            m_hasDeferredFrame = true;
+            return image;
+        }
+    }
+#else
+    UNUSED_PARAM(subsamplingLevel);
+    UNUSED_PARAM(options);
+#endif
 
     auto* buffer = frameBufferAtIndex(index);
     if (!buffer || buffer->isInvalid() || !buffer->hasBackingStore())

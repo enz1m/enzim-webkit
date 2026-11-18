@@ -53,6 +53,13 @@ public:
     std::unique_ptr<CoordinatedPlatformLayerBuffer> copyBuffer() const;
 #endif
 
+#if !USE(TEXTURE_MAPPER) && USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+    // The frame in GPU memory, when it was not imported here because the GPU
+    // process composites.
+    RefPtr<DMABufBuffer> dmabuf() const;
+    Origin origin() const { return m_origin; }
+#endif
+
 private:
 #if USE(TEXTURE_MAPPER)
     void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix& modelViewMatrix = TransformationMatrix(), float opacity = 1.0) override;
@@ -94,6 +101,7 @@ private:
     std::optional<GstMappedFrame> m_mappedVideoFrame;
 #else
     sk_sp<SkImage> m_image;
+    Origin m_origin { Origin::TopLeft };
 #endif
 };
 

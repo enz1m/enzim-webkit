@@ -58,6 +58,7 @@ namespace WebCore {
         // ScalableImageDecoder
         String filenameExtension() const override { return "jpg"_s; }
         ScalableImageDecoderFrame* frameBufferAtIndex(size_t index) override;
+        bool supportsDeferredDecoding() const final { return true; }
         // CAUTION: setFailed() deletes |m_reader|.  Be careful to avoid
         // accessing deleted memory, especially when calling this from inside
         // JPEGImageReader!

@@ -136,8 +136,11 @@ Ref<SkiaRecordingResult> CoordinatedTileManager::record(const GraphicsLayerCoord
 
 Ref<CoordinatedTileBuffer> CoordinatedTileManager::scheduleReplay(const GraphicsLayerCoordinated& layer, const Ref<SkiaRecordingResult>& recording, const IntRect& tileRect, const IntRect& dirtyRect)
 {
+    auto flags = recording->contentsOpaque() ? CoordinatedTileBuffer::NoFlags : CoordinatedTileBuffer::SupportsAlpha;
+    if (ProcessCapabilities::compositesInGPUProcess())
+        return CoordinatedRecordedTileBuffer::create(Ref { recording }, tileRect.size(), flags);
+
     Ref buffer = [&] -> Ref<CoordinatedTileBuffer> {
-        auto flags = recording->contentsOpaque() ? CoordinatedTileBuffer::NoFlags : CoordinatedTileBuffer::SupportsAlpha;
         if (recording->renderingMode() == RenderingMode::Unaccelerated)
             return CoordinatedUnacceleratedTileBuffer::create(dirtyRect.size(), flags);
 

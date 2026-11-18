@@ -206,8 +206,11 @@ std::optional<Color> NativeImage::singlePixelSolidColor() const
         return pixmap.getColor(0, 0);
     }
 
+    // A still image the GPU process decodes is decoded here when asked.
+    if (platformImage->isLazyGenerated())
+        platformImage = platformImage->makeRasterImage(nullptr);
     SkPixmap pixmap;
-    if (!platformImage->peekPixels(&pixmap))
+    if (!platformImage || !platformImage->peekPixels(&pixmap))
         return std::nullopt;
 
     return pixmap.getColor(0, 0);

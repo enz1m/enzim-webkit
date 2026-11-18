@@ -537,8 +537,12 @@ pid_t Connection::remoteProcessID(GSocket* socket)
     GRefPtr<GUnixConnection> connection = adoptGRef(G_UNIX_CONNECTION(g_object_new(G_TYPE_UNIX_CONNECTION, "socket", socket, nullptr)));
     GUniqueOutPtr<GError> error;
     GRefPtr<GCredentials> credentials = adoptGRef(g_unix_connection_receive_credentials(connection.get(), nullptr, &error.outPtr()));
-    if (!credentials)
-        g_error("Connection: failed to receive credentials: %s", error->message);
+    // A child that exits during startup closes the socket before sending its
+    // credentials; the caller treats the missing process as a failed launch.
+    if (!credentials) {
+        g_warning("Connection: failed to receive credentials: %s", error->message);
+        return 0;
+    }
 
     pid_t processID = g_credentials_get_unix_pid(credentials.get(), &error.outPtr());
     if (error)

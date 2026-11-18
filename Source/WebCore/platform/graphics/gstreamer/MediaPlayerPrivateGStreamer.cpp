@@ -25,6 +25,7 @@
 
 #include "config.h"
 #include "MediaPlayerPrivateGStreamer.h"
+#include "ProcessCapabilities.h"
 #include "TrackPrivateBaseGStreamer.h"
 
 #if ENABLE(VIDEO) && USE(GSTREAMER)
@@ -4786,7 +4787,9 @@ GstElement* MediaPlayerPrivateGStreamer::createVideoSink()
     }
 
 #if USE(GSTREAMER_GL)
-    if (!m_videoSink && m_canRenderingBeAccelerated)
+    // When the GPU process composites, frames go there in system memory
+    // rather than through a GL context of this process.
+    if (!m_videoSink && m_canRenderingBeAccelerated && !ProcessCapabilities::compositesInGPUProcess())
         m_videoSink = createVideoSinkGL();
 #endif
 

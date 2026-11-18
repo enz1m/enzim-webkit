@@ -5871,11 +5871,9 @@ struct WebCore::KeypressCommand {
 }
 #endif
 
-#if !USE(COORDINATED_GRAPHICS)
 class WebCore::FilterOperations {
     Vector<Ref<WebCore::FilterOperation>> m_operations;
 }
-#endif // !USE(COORDINATED_GRAPHICS)
 
 header: <WebCore/Filter.h>
 [CustomHeader, AdditionalEncoder=StreamConnectionEncoder] struct WebCore::FilterGeometry {
@@ -6174,7 +6172,6 @@ header: <WebCore/SharedBuffer.h>
     Ref<WebCore::FragmentedSharedBuffer> asFragmentedSharedBuffer();
 };
 
-#if !USE(COORDINATED_GRAPHICS)
 [RefCounted] class WebCore::FilterOperation subclasses {
     WebCore::BasicColorMatrixFilterOperation
     WebCore::BasicComponentTransferFilterOperation
@@ -6206,7 +6203,6 @@ header: <WebCore/SharedBuffer.h>
 [CustomHeader, RefCounted] class WebCore::PassthroughFilterOperation {
     [NotSerialized] WebCore::FilterOperation::Type type();
 };
-#endif // !USE(COORDINATED_GRAPHICS)
 
 [AdditionalEncoder=StreamConnectionEncoder, RefCounted] class WebCore::FilterEffect subclasses {
     WebCore::FEBlend

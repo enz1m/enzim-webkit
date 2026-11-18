@@ -958,6 +958,14 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
     } else {
         // Only X11 users need this for XShm which is only the Web process.
         sandboxArgs.append("--unshare-ipc"_s);
+#if ENABLE(GPU_PROCESS)
+        // The GPU process renders with the GPU and replays text, and needs
+        // nothing else the web process gets: no sound, D-Bus or display.
+        if (launchOptions.processType == ProcessLauncher::ProcessType::GPU) {
+            bindFonts(sandboxArgs);
+            bindOpenGL(sandboxArgs);
+        }
+#endif
     }
 
 #if ENABLE(DEVELOPER_MODE)

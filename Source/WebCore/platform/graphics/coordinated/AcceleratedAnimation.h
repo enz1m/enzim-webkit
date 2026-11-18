@@ -67,6 +67,11 @@ public:
 
     const String& name() const LIFETIME_BOUND { return m_name; }
     const GraphicsLayerKeyframeValueList& keyframes() const LIFETIME_BOUND { return m_keyframes; }
+    const TimingFunction& timingFunction() const LIFETIME_BOUND { return m_timingFunction.get(); }
+    const TimingFunction* defaultTimingFunctionForKeyframes() const { return m_defaultTimingFunctionForKeyframes.get(); }
+    double iterationCount() const { return m_iterationCount; }
+    double duration() const { return m_duration; }
+    GraphicsLayerAnimation::Direction direction() const { return m_direction; }
     bool isTransformAnimation() const;
 
 private:

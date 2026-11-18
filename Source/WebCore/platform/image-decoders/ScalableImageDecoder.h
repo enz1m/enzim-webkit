@@ -165,6 +165,12 @@ public:
     // and returns true. Otherwise returns false.
     std::optional<IntPoint> hotSpot() const override { return std::nullopt; }
 
+    // Whether a still image of this format may be left encoded until its
+    // pixels are needed, for decoding in the GPU process.
+    virtual bool supportsDeferredDecoding() const { return false; }
+    // Decodes frames when asked for them even when the GPU process composites.
+    void setDecodesImmediately() { m_decodesImmediately = true; }
+
 protected:
     // Decodes as much of the requested frame as possible, and returns an
     // ScalableImageDecoder-owned pointer.
@@ -191,6 +197,11 @@ protected:
 
 private:
     virtual void tryDecodeSize(bool) = 0;
+
+    bool shouldDeferDecoding(size_t, SubsamplingLevel, const DecodingOptions&) const WTF_REQUIRES_LOCK(m_lock);
+
+    bool m_decodesImmediately { false };
+    bool m_hasDeferredFrame WTF_GUARDED_BY_LOCK(m_lock) { false };
 
     IntSize m_size;
     EncodedDataStatus m_encodedDataStatus { EncodedDataStatus::TypeAvailable };

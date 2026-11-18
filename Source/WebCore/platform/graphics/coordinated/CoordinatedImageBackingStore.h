@@ -31,6 +31,7 @@
 
 #if !USE(TEXTURE_MAPPER)
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/core/SkImage.h>
 #include <skia/gpu/ganesh/GrContextThreadSafeProxy.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #endif
@@ -51,6 +52,9 @@ public:
 
     bool isSameNativeImage(const NativeImage& nativeImage) { return nativeImage.uniqueID() == m_uniqueID; }
     CoordinatedPlatformLayerBuffer* buffer() const LIFETIME_BOUND { return m_buffer.get(); }
+#if !USE(TEXTURE_MAPPER)
+    const sk_sp<SkImage>& platformImage() const LIFETIME_BOUND { return m_image; }
+#endif
 
 private:
 #if USE(TEXTURE_MAPPER)
@@ -61,6 +65,9 @@ private:
 
     const std::unique_ptr<CoordinatedPlatformLayerBuffer> m_buffer;
     uint64_t m_uniqueID { 0 };
+#if !USE(TEXTURE_MAPPER)
+    sk_sp<SkImage> m_image;
+#endif
 };
 
 } // namespace WebCore

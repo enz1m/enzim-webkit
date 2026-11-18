@@ -56,6 +56,14 @@ public:
 #endif
     virtual ~CoordinatedPlatformLayerBufferDMABuf();
 
+#if !USE(TEXTURE_MAPPER)
+    // For a compositor in the GPU process: the buffer and the fence that
+    // signals when its contents are rendered.
+    DMABufBuffer& dmabuf() const { return m_dmabuf.get(); }
+    Origin origin() const { return m_origin; }
+    WTF::UnixFileDescriptor takeFenceFD() { return WTF::move(m_fenceFD); }
+#endif
+
 private:
 #if USE(TEXTURE_MAPPER)
     void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix& modelViewMatrix = TransformationMatrix(), float opacity = 1.0) override;
@@ -71,6 +79,8 @@ private:
     WTF::UnixFileDescriptor m_fenceFD;
 #else
     sk_sp<SkImage> m_image;
+    Origin m_origin { Origin::TopLeft };
+    WTF::UnixFileDescriptor m_fenceFD;
 #endif
 };
 

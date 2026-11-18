@@ -99,6 +99,18 @@ static bool isFileDescriptorReadable(int fd)
     return pollFD.revents & (G_IO_IN | G_IO_NVAL);
 }
 
+void FenceMonitor::reset()
+{
+    if (m_source) {
+        auto& source = *reinterpret_cast<FenceSource*>(m_source.get());
+        if (source.tag) {
+            g_source_remove_unix_fd(&source.base, source.tag);
+            source.tag = nullptr;
+        }
+    }
+    m_fd = { };
+}
+
 void FenceMonitor::addFileDescriptor(UnixFileDescriptor&& fd)
 {
     RELEASE_ASSERT(!m_fd);
