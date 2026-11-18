@@ -32,6 +32,11 @@
 #include "JavaScriptEvaluationResult.h"
 #include "NotificationService.h"
 #include "PageLoadState.h"
+#if PLATFORM(WPE) && USE(SKIA)
+#include "PrintInfo.h"
+#include <WebCore/PermissionName.h>
+#include <cmath>
+#endif
 #include "PlatformXRSystem.h"
 #include "ProcessTerminationReason.h"
 #include "ProvisionalPageProxy.h"
@@ -76,6 +81,13 @@
 #include "WebKitWebsitePoliciesPrivate.h"
 #include "WebKitWindowPropertiesPrivate.h"
 #include "WebPageMessages.h"
+#if PLATFORM(WPE) && ENABLE(GEOLOCATION)
+#include "WebBackForwardCache.h"
+#include "WebProcessProxy.h"
+#include <cstring>
+#include <wtf/RefCounted.h>
+#endif
+
 #include <JavaScriptCore/APICast.h>
 #include <WebCore/CertificateInfo.h>
 #include <WebCore/FloatPoint.h>
@@ -6005,7 +6017,12 @@ WebKitMediaCaptureState webkit_web_view_get_camera_capture_state(WebKitWebView* 
  */
 void webkit_web_view_set_camera_capture_state(WebKitWebView* webView, WebKitMediaCaptureState state)
 {
-    if (webkit_web_view_get_camera_capture_state(webView) == WEBKIT_MEDIA_CAPTURE_STATE_NONE)
+#if PLATFORM(WPE)
+    bool resetsPermissionCache = state == WEBKIT_MEDIA_CAPTURE_STATE_NONE;
+#else
+    bool resetsPermissionCache = false;
+#endif
+    if (webkit_web_view_get_camera_capture_state(webView) == WEBKIT_MEDIA_CAPTURE_STATE_NONE && !resetsPermissionCache)
         return;
 
     webkitWebViewConfigureMediaCapture(webView, WebCore::MediaProducerMediaCaptureKind::Camera, state);
@@ -6047,7 +6064,12 @@ WebKitMediaCaptureState webkit_web_view_get_microphone_capture_state(WebKitWebVi
  */
 void webkit_web_view_set_microphone_capture_state(WebKitWebView* webView, WebKitMediaCaptureState state)
 {
-    if (webkit_web_view_get_microphone_capture_state(webView) == WEBKIT_MEDIA_CAPTURE_STATE_NONE)
+#if PLATFORM(WPE)
+    bool resetsPermissionCache = state == WEBKIT_MEDIA_CAPTURE_STATE_NONE;
+#else
+    bool resetsPermissionCache = false;
+#endif
+    if (webkit_web_view_get_microphone_capture_state(webView) == WEBKIT_MEDIA_CAPTURE_STATE_NONE && !resetsPermissionCache)
         return;
 
     webkitWebViewConfigureMediaCapture(webView, WebCore::MediaProducerMediaCaptureKind::Microphone, state);
@@ -6310,3 +6332,280 @@ void webkitWebViewLoadServiceWorker(WebKitWebView* webView, const URL& url, bool
         completionHandler(success);
     });
 }
+
+
+#if PLATFORM(WPE) && USE(SKIA)
+namespace {
+struct PDFCancelData {
+    PDFCancelData(WebKitWebView* view, uint64_t identifier)
+        : context(g_main_context_ref_thread_default())
+        , ownerThread(g_thread_ref(g_thread_self()))
+        , identifier(identifier)
+    {
+        g_weak_ref_init(&webView, view);
+    }
+    ~PDFCancelData()
+    {
+        g_weak_ref_clear(&webView);
+        g_main_context_unref(context);
+        g_thread_unref(ownerThread);
+    }
+    GMainContext* context;
+    GThread* ownerThread;
+    GWeakRef webView;
+    uint64_t identifier;
+};
+struct PDFCancelDispatch {
+    WebKitWebView* webView;
+    uint64_t identifier;
+};
+
+void cancelPDF(GCancellable*, gpointer userData)
+{
+    auto& data = *static_cast<PDFCancelData*>(userData);
+    auto* view = static_cast<WebKitWebView*>(g_weak_ref_get(&data.webView));
+    if (!view)
+        return;
+    if (g_thread_self() == data.ownerThread) {
+        webkitWebViewGetPage(view).cancelPDFExport(data.identifier);
+        g_object_unref(view);
+        return;
+    }
+    auto* dispatch = new PDFCancelDispatch { view, data.identifier };
+    GSource* source = g_idle_source_new();
+    g_source_set_priority(source, G_PRIORITY_HIGH);
+    g_source_set_callback(source, [](gpointer userData) -> gboolean {
+        auto& dispatch = *static_cast<PDFCancelDispatch*>(userData);
+        webkitWebViewGetPage(dispatch.webView).cancelPDFExport(dispatch.identifier);
+        return G_SOURCE_REMOVE;
+    }, dispatch, [](gpointer userData) {
+        auto* dispatch = static_cast<PDFCancelDispatch*>(userData);
+        g_object_unref(dispatch->webView);
+        delete dispatch;
+    });
+    g_source_attach(source, data.context);
+    g_source_unref(source);
+}
+}
+
+void webkit_web_view_enzui_export_pdf(WebKitWebView* webView, guint64 identifier,
+    double paperWidth, double paperHeight, double marginTop, double marginRight, double marginBottom, double marginLeft,
+    double scale, guint first, guint count, gboolean printBackgrounds,
+    GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    GRefPtr<GTask> task = adoptGRef(g_task_new(webView, cancellable, callback, userData));
+    g_task_set_source_tag(task.get(), reinterpret_cast<gpointer>(webkit_web_view_enzui_export_pdf));
+    if (g_task_return_error_if_cancelled(task.get()))
+        return;
+    if (!identifier || !std::isfinite(paperWidth) || !std::isfinite(paperHeight) || !std::isfinite(scale)
+        || paperWidth < 72 || paperWidth > 14400 || paperHeight < 72 || paperHeight > 14400
+        || scale < 0.1 || scale > 4 || first >= 256 || count > 256) {
+        g_task_return_new_error(task.get(), G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid PDF print settings");
+        return;
+    }
+    for (double margin : { marginTop, marginRight, marginBottom, marginLeft }) {
+        if (!std::isfinite(margin) || margin < 0 || margin > 14400) {
+            g_task_return_new_error(task.get(), G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid PDF print margin");
+            return;
+        }
+    }
+    if (paperWidth - marginLeft - marginRight < 36 || paperHeight - marginTop - marginBottom < 36) {
+        g_task_return_new_error(task.get(), G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "PDF print margins leave no printable area");
+        return;
+    }
+    PrintInfo info;
+    info.availablePaperWidth = paperWidth - marginLeft - marginRight;
+    info.availablePaperHeight = paperHeight - marginTop - marginBottom;
+    info.pageSetupScaleFactor = scale;
+    info.margin = { narrowPrecisionToFloat(marginTop), narrowPrecisionToFloat(marginRight), narrowPrecisionToFloat(marginBottom), narrowPrecisionToFloat(marginLeft) };
+    gulong cancellationHandler = 0;
+    if (cancellable) {
+        auto* data = new PDFCancelData(webView, identifier);
+        cancellationHandler = g_cancellable_connect(cancellable, G_CALLBACK(cancelPDF), data, [](gpointer data) { delete static_cast<PDFCancelData*>(data); });
+    }
+    if (g_task_return_error_if_cancelled(task.get())) {
+        if (cancellationHandler)
+            g_cancellable_disconnect(cancellable, cancellationHandler);
+        return;
+    }
+    webkitWebViewGetPage(webView).exportPDF(identifier, info, first, count, printBackgrounds,
+        [task = WTF::move(task), protectedCancellable = GRefPtr<GCancellable>(cancellable), cancellationHandler](RefPtr<WebCore::SharedBuffer>&& data, String&& error) mutable {
+            if (cancellationHandler)
+                g_cancellable_disconnect(protectedCancellable.get(), cancellationHandler);
+            if (g_task_return_error_if_cancelled(task.get()))
+                return;
+            if (!data || data->isEmpty()) {
+                g_task_return_new_error(task.get(), G_IO_ERROR, error == "PDF exceeds 64 MiB export limit"_s ? G_IO_ERROR_NO_SPACE : G_IO_ERROR_FAILED, "%s", error.isEmpty() ? "PDF export interrupted" : reinterpret_cast<const char*>(error.utf8().data()));
+                return;
+            }
+            auto bytes = data->span();
+            g_task_return_pointer(task.get(), g_bytes_new(bytes.data(), bytes.size()), reinterpret_cast<GDestroyNotify>(g_bytes_unref));
+        });
+}
+
+GBytes* webkit_web_view_enzui_export_pdf_finish(WebKitWebView* webView, GAsyncResult* result, GError** error)
+{
+    g_return_val_if_fail(g_task_is_valid(result, webView), nullptr);
+    g_return_val_if_fail(g_async_result_is_tagged(result, reinterpret_cast<gpointer>(webkit_web_view_enzui_export_pdf)), nullptr);
+    return static_cast<GBytes*>(g_task_propagate_pointer(G_TASK(result), error));
+}
+#endif
+
+#if PLATFORM(WPE) && ENABLE(MEDIA_STREAM)
+extern "C" WEBKIT_API void webkit_web_view_enzui_clear_media_permission_history(WebKitWebView* webView, gboolean camera)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    getPage(webView).clearUserMediaPermissionRequestHistory(camera ? WebCore::PermissionName::Camera : WebCore::PermissionName::Microphone);
+}
+#endif
+
+#if PLATFORM(WPE) && ENABLE(GEOLOCATION)
+extern "C" WEBKIT_API void webkit_web_view_enzui_revoke_geolocation(WebKitWebView*, GCancellable*, GAsyncReadyCallback, gpointer);
+extern "C" WEBKIT_API gboolean webkit_web_view_enzui_revoke_geolocation_finish(WebKitWebView*, GAsyncResult*, GError**);
+extern "C" WEBKIT_API void webkit_web_view_enzui_reset_geolocation_permission(WebKitWebView*, GCancellable*, GAsyncReadyCallback, gpointer);
+extern "C" WEBKIT_API gboolean webkit_web_view_enzui_reset_geolocation_permission_finish(WebKitWebView*, GAsyncResult*, GError**);
+
+namespace {
+struct GeolocationRevokeTarget {
+    Ref<WebProcessProxy> process;
+    WebCore::PageIdentifier pageID;
+};
+
+class GeolocationRevokeTask;
+struct GeolocationTaskReference {
+    Ref<GeolocationRevokeTask> task;
+};
+
+class GeolocationRevokeTask final : public RefCounted<GeolocationRevokeTask> {
+public:
+    static Ref<GeolocationRevokeTask> create(GRefPtr<GTask>&& task, Vector<GeolocationRevokeTarget>&& targets, bool revoke)
+    {
+        return adoptRef(*new GeolocationRevokeTask(WTF::move(task), WTF::move(targets), revoke));
+    }
+
+    void start()
+    {
+        if (m_targets.isEmpty()) {
+            complete(true, 0, nullptr);
+            return;
+        }
+        m_deadline = g_timeout_source_new(10000);
+        g_source_set_callback(m_deadline, [](gpointer data) -> gboolean {
+            Ref task = static_cast<GeolocationTaskReference*>(data)->task.copyRef();
+            task->complete(false, G_IO_ERROR_TIMED_OUT, "Geolocation revocation acknowledgement timed out");
+            return G_SOURCE_REMOVE;
+        }, new GeolocationTaskReference { Ref { *this } }, [](gpointer data) {
+            delete static_cast<GeolocationTaskReference*>(data);
+        });
+        if (!g_source_attach(m_deadline, g_task_get_context(m_task.get()))) {
+            complete(false, G_IO_ERROR_FAILED, "Could not bound geolocation revocation");
+            return;
+        }
+        // Retain the original processes even when COOP navigation replaces the view's renderer.
+        auto targets = m_targets;
+        for (auto& target : targets) {
+            if (m_completed)
+                break;
+            UserMessage command;
+            command.type = UserMessage::Type::Message;
+            command.name = m_revoke ? String("enzui-geolocation-revoke-v1"_s).utf8() : String("enzui-geolocation-reset-v1"_s).utf8();
+            target.process->sendWithAsyncReply(Messages::WebPage::SendMessageToWebProcessExtensionWithReply(WTF::move(command)),
+                [protectedThis = Ref { *this }](UserMessage&& reply) {
+                    protectedThis->didReply(WTF::move(reply));
+                }, target.pageID.toUInt64());
+        }
+    }
+
+private:
+    GeolocationRevokeTask(GRefPtr<GTask>&& task, Vector<GeolocationRevokeTarget>&& targets, bool revoke)
+        : m_task(WTF::move(task))
+        , m_targets(WTF::move(targets))
+        , m_remaining(m_targets.size())
+        , m_revoke(revoke)
+    {
+    }
+
+    void didReply(UserMessage&& reply)
+    {
+        if (m_completed)
+            return;
+        const char* expectedReply = m_revoke ? "enzui-geolocation-revoked-v1" : "enzui-geolocation-reset-done-v1";
+        if (reply.type != UserMessage::Type::Message || !reply.name.length() || std::strcmp(reinterpret_cast<const char*>(reply.name.data()), expectedReply)
+            || !reply.parameters || !g_variant_is_of_type(reply.parameters.get(), G_VARIANT_TYPE_UINT32)
+            || g_variant_get_uint32(reply.parameters.get()) != 1 || reply.fileDescriptors) {
+            complete(false, G_IO_ERROR_INVALID_DATA, "Invalid geolocation revocation acknowledgement");
+            return;
+        }
+        if (!--m_remaining)
+            complete(true, 0, nullptr);
+    }
+
+    void complete(bool succeeded, int errorCode, const char* errorMessage)
+    {
+        if (m_completed)
+            return;
+        m_completed = true;
+        auto task = std::exchange(m_task, nullptr);
+        auto targets = std::exchange(m_targets, { });
+        if (GSource* deadline = std::exchange(m_deadline, nullptr)) {
+            g_source_destroy(deadline);
+            g_source_unref(deadline);
+        }
+        if (!succeeded) {
+            for (auto& target : targets)
+                target.process->requestTermination(ProcessTerminationReason::RequestedByClient);
+            g_task_return_new_error(task.get(), G_IO_ERROR, errorCode, "%s", errorMessage);
+        } else
+            g_task_return_boolean(task.get(), TRUE);
+    }
+
+    GRefPtr<GTask> m_task;
+    Vector<GeolocationRevokeTarget> m_targets;
+    size_t m_remaining { 0 };
+    GSource* m_deadline { nullptr };
+    bool m_completed { false };
+    bool m_revoke { true };
+};
+
+void changeGeolocationPermission(WebKitWebView* webView, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData, bool revoke, gpointer sourceTag)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    GRefPtr<GTask> task = adoptGRef(g_task_new(webView, cancellable, callback, userData));
+    g_task_set_source_tag(task.get(), sourceTag);
+    Ref page = getPage(webView);
+    Vector<GeolocationRevokeTarget> targets;
+    if (page->hasRunningProcess()) {
+        page->forEachWebContentProcess([&](WebProcessProxy& process, WebCore::PageIdentifier pageID) {
+            targets.append({ Ref { process }, pageID });
+        });
+    }
+    page->backForwardCache().removeEntriesForPage(page.get());
+    GeolocationRevokeTask::create(WTF::move(task), WTF::move(targets), revoke)->start();
+}
+}
+
+void webkit_web_view_enzui_revoke_geolocation(WebKitWebView* webView, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
+{
+    changeGeolocationPermission(webView, cancellable, callback, userData, true, reinterpret_cast<gpointer>(webkit_web_view_enzui_revoke_geolocation));
+}
+
+void webkit_web_view_enzui_reset_geolocation_permission(WebKitWebView* webView, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
+{
+    changeGeolocationPermission(webView, cancellable, callback, userData, false, reinterpret_cast<gpointer>(webkit_web_view_enzui_reset_geolocation_permission));
+}
+
+gboolean webkit_web_view_enzui_reset_geolocation_permission_finish(WebKitWebView* webView, GAsyncResult* result, GError** error)
+{
+    g_return_val_if_fail(g_task_is_valid(result, webView), FALSE);
+    g_return_val_if_fail(g_async_result_is_tagged(result, reinterpret_cast<gpointer>(webkit_web_view_enzui_reset_geolocation_permission)), FALSE);
+    return g_task_propagate_boolean(G_TASK(result), error);
+}
+
+gboolean webkit_web_view_enzui_revoke_geolocation_finish(WebKitWebView* webView, GAsyncResult* result, GError** error)
+{
+    g_return_val_if_fail(g_task_is_valid(result, webView), FALSE);
+    g_return_val_if_fail(g_async_result_is_tagged(result, reinterpret_cast<gpointer>(webkit_web_view_enzui_revoke_geolocation)), FALSE);
+    return g_task_propagate_boolean(G_TASK(result), error);
+}
+#endif

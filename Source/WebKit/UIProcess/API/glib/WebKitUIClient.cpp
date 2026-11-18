@@ -25,6 +25,7 @@
 #include "DrawingAreaProxy.h"
 #include "GeolocationPermissionRequestProxy.h"
 #include "NotificationPermissionRequest.h"
+#include "WebFrameProxy.h"
 #include "WebKitDeviceInfoPermissionRequestPrivate.h"
 #include "WebKitFileChooserRequestPrivate.h"
 #include "WebKitGeolocationPermissionRequestPrivate.h"
@@ -54,6 +55,54 @@
 #endif
 
 using namespace WebKit;
+
+#if PLATFORM(WPE)
+static void attachPermissionOrigins(GObject* object, const WebCore::SecurityOriginData& requesterOrigin, const WebCore::SecurityOriginData& topOrigin, const char* requesterKey = "enzui-permission-requesting-origin-v1", const char* topKey = "enzui-permission-top-origin-v1")
+{
+    if (requesterOrigin.isNull() || requesterOrigin.isOpaque() || topOrigin.isNull() || topOrigin.isOpaque())
+        return;
+    auto requesterText = requesterOrigin.toString();
+    auto topText = topOrigin.toString();
+    if (requesterText.contains('\0') || topText.contains('\0'))
+        return;
+    auto requester = requesterText.utf8();
+    auto top = topText.utf8();
+    if (requester.length() > 2048 || top.length() > 2048)
+        return;
+    // Owned request-time security origins, never reconstructed from frame URLs.
+    g_object_set_data_full(object, requesterKey, g_strdup(reinterpret_cast<const char*>(requester.data())), g_free);
+    g_object_set_data_full(object, topKey, g_strdup(reinterpret_cast<const char*>(top.data())), g_free);
+}
+
+class PermissionQueryOriginScope {
+public:
+    PermissionQueryOriginScope(WebKitWebView* view, const WebCore::SecurityOriginData& requesterOrigin)
+        : m_view(view)
+        , m_previousRequester(g_object_steal_data(G_OBJECT(view), requesterKey))
+        , m_previousTop(g_object_steal_data(G_OBJECT(view), topKey))
+    {
+        if (RefPtr mainFrame = webkitWebViewGetPage(view).mainFrame())
+            attachPermissionOrigins(G_OBJECT(view), requesterOrigin, mainFrame->securityOrigin()->data(), requesterKey, topKey);
+    }
+
+    PermissionQueryOriginScope(const PermissionQueryOriginScope&) = delete;
+    PermissionQueryOriginScope& operator=(const PermissionQueryOriginScope&) = delete;
+
+    ~PermissionQueryOriginScope()
+    {
+        // A nested query temporarily replaces the outer callback's owned snapshots.
+        g_object_set_data_full(G_OBJECT(m_view.get()), requesterKey, m_previousRequester, g_free);
+        g_object_set_data_full(G_OBJECT(m_view.get()), topKey, m_previousTop, g_free);
+    }
+
+private:
+    static constexpr const char* requesterKey = "enzui-permission-query-requesting-origin-v1";
+    static constexpr const char* topKey = "enzui-permission-query-top-origin-v1";
+    GRefPtr<WebKitWebView> m_view;
+    gpointer m_previousRequester;
+    gpointer m_previousTop;
+};
+#endif
 
 class UIClient;
 
@@ -287,9 +336,13 @@ private:
         return true;
     }
 
-    void decidePolicyForGeolocationPermissionRequest(WebPageProxy&, WebFrameProxy&, const WebKit::FrameInfoData&, Function<void(bool)>& completionHandler) final
+    void decidePolicyForGeolocationPermissionRequest(WebPageProxy& page, WebFrameProxy& frame, const WebKit::FrameInfoData&, Function<void(bool)>& completionHandler) final
     {
         GRefPtr<WebKitGeolocationPermissionRequest> geolocationPermissionRequest = adoptGRef(webkitGeolocationPermissionRequestCreate(GeolocationPermissionRequest::create(std::exchange(completionHandler, nullptr)).ptr()));
+#if PLATFORM(WPE)
+        if (RefPtr mainFrame = page.mainFrame())
+            attachPermissionOrigins(G_OBJECT(geolocationPermissionRequest.get()), frame.securityOrigin()->data(), mainFrame->securityOrigin()->data());
+#endif
         webkitWebViewMakePermissionRequest(m_webView, WEBKIT_PERMISSION_REQUEST(geolocationPermissionRequest.get()));
     }
 
@@ -299,15 +352,24 @@ private:
         webkitWebViewMakePermissionRequest(m_webView, WEBKIT_PERMISSION_REQUEST(permissionRequest.get()));
     }
 
-    void decidePolicyForUserMediaPermissionRequest(WebPageProxy&, WebFrameProxy&, API::SecurityOrigin& userMediaDocumentOrigin, API::SecurityOrigin& topLevelDocumentOrigin, UserMediaPermissionRequestProxy& permissionRequest) final
+    void decidePolicyForUserMediaPermissionRequest(WebPageProxy& page, WebFrameProxy& frame, API::SecurityOrigin& userMediaDocumentOrigin, API::SecurityOrigin& topLevelDocumentOrigin, UserMediaPermissionRequestProxy& permissionRequest) final
     {
         GRefPtr<WebKitUserMediaPermissionRequest> userMediaPermissionRequest = adoptGRef(webkitUserMediaPermissionRequestCreate(permissionRequest, userMediaDocumentOrigin, topLevelDocumentOrigin));
+#if PLATFORM(WPE)
+        if (RefPtr mainFrame = page.mainFrame(); mainFrame && userMediaDocumentOrigin.securityOrigin() == frame.securityOrigin()->data()
+            && topLevelDocumentOrigin.securityOrigin() == mainFrame->securityOrigin()->data())
+            attachPermissionOrigins(G_OBJECT(userMediaPermissionRequest.get()), frame.securityOrigin()->data(), mainFrame->securityOrigin()->data());
+#endif
         webkitWebViewMakePermissionRequest(m_webView, WEBKIT_PERMISSION_REQUEST(userMediaPermissionRequest.get()));
     }
 
-    void decidePolicyForNotificationPermissionRequest(WebPageProxy&, API::SecurityOrigin&, CompletionHandler<void(bool allowed)>&& completionHandler) final
+    void decidePolicyForNotificationPermissionRequest(WebPageProxy& page, API::SecurityOrigin& origin, CompletionHandler<void(bool allowed)>&& completionHandler) final
     {
         GRefPtr<WebKitNotificationPermissionRequest> notificationPermissionRequest = adoptGRef(webkitNotificationPermissionRequestCreate(NotificationPermissionRequest::create(WTF::move(completionHandler)).ptr()));
+#if PLATFORM(WPE)
+        if (RefPtr mainFrame = page.mainFrame())
+            attachPermissionOrigins(G_OBJECT(notificationPermissionRequest.get()), origin.securityOrigin(), mainFrame->securityOrigin()->data());
+#endif
         webkitWebViewMakePermissionRequest(m_webView, WEBKIT_PERMISSION_REQUEST(notificationPermissionRequest.get()));
     }
 
@@ -383,6 +445,9 @@ private:
     void queryPermission(const WTF::String& permissionName, API::SecurityOrigin& origin, CompletionHandler<void(std::optional<WebCore::PermissionState>)>&& completionHandler) final
     {
         auto* query = webkitPermissionStateQueryCreate(permissionName, origin, WTF::move(completionHandler));
+#if PLATFORM(WPE)
+        PermissionQueryOriginScope originScope(m_webView, origin.securityOrigin());
+#endif
         webkitWebViewPermissionStateQuery(m_webView, query);
         webkit_permission_state_query_unref(query);
     }

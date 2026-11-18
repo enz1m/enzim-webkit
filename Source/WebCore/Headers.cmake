@@ -320,6 +320,7 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     Modules/gamepad/NavigatorGamepad.h
 
     Modules/geolocation/Geolocation.h
+    Modules/geolocation/NavigatorGeolocation.h
     Modules/geolocation/GeolocationClient.h
     Modules/geolocation/GeolocationController.h
     Modules/geolocation/GeolocationCoordinates.h

@@ -17499,6 +17499,60 @@ bool WebPageProxy::canRunModal()
     return hasRunningProcess() && m_canRunModal;
 }
 
+#if PLATFORM(WPE) && USE(SKIA)
+struct PDFExportTarget {
+    WTF_MAKE_TZONE_ALLOCATED_INLINE(PDFExportTarget);
+public:
+    PDFExportTarget(uint64_t identifier, WebProcessProxy& process, WebCore::PageIdentifier pageID)
+        : identifier(identifier)
+        , process(process)
+        , pageID(pageID)
+    {
+    }
+    uint64_t identifier;
+    WeakPtr<WebProcessProxy> process;
+    WebCore::PageIdentifier pageID;
+};
+
+static HashMap<WebPageProxy*, std::unique_ptr<PDFExportTarget>>& pdfExportTargets()
+{
+    static MainRunLoopNeverDestroyed<HashMap<WebPageProxy*, std::unique_ptr<PDFExportTarget>>> targets;
+    return targets.get();
+}
+
+void WebPageProxy::exportPDF(uint64_t identifier, const PrintInfo& printInfo, uint32_t first, uint32_t count, bool printBackgrounds, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&, String&&)>&& callback)
+{
+    if (!identifier || m_pdfExportFrame || !mainFrame() || !hasRunningProcess()) {
+        callback(nullptr, "PDF export unavailable or already in progress"_s);
+        return;
+    }
+    auto frameID = mainFrame()->frameID();
+    Ref process = processContainingFrame(frameID);
+    auto pageID = webPageIDInProcess(process);
+    m_pdfExportFrame = std::pair { identifier, frameID };
+    pdfExportTargets().set(this, makeUnique<PDFExportTarget>(identifier, process.get(), pageID));
+    process->sendWithAsyncReply(Messages::WebPage::ExportPDF(identifier, frameID, printInfo, first, count, printBackgrounds), [protectedThis = Ref { *this }, identifier, callback = WTF::move(callback)](RefPtr<WebCore::SharedBuffer>&& data, String&& error) mutable {
+        auto target = pdfExportTargets().find(protectedThis.ptr());
+        if (target != pdfExportTargets().end() && target->value->identifier == identifier)
+            pdfExportTargets().remove(target);
+        if (protectedThis->m_pdfExportFrame && protectedThis->m_pdfExportFrame->first == identifier)
+            protectedThis->m_pdfExportFrame = std::nullopt;
+        callback(WTF::move(data), WTF::move(error));
+    }, pageID);
+}
+
+void WebPageProxy::cancelPDFExport(uint64_t identifier)
+{
+    auto target = pdfExportTargets().find(this);
+    if (target == pdfExportTargets().end() || target->value->identifier != identifier)
+        return;
+    RefPtr process = target->value->process.get();
+    auto pageID = target->value->pageID;
+    if (process)
+        process->send(Messages::WebPage::CancelPDFExport(identifier), pageID);
+}
+#endif
+
 void WebPageProxy::beginPrinting(WebFrameProxy* frame, const PrintInfo& printInfo)
 {
     if (m_printingFrameID)

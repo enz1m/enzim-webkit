@@ -2081,6 +2081,10 @@ public:
     void setCanRunModal(bool);
     bool LEGACY_NODELETE canRunModal();
 
+#if PLATFORM(WPE) && USE(SKIA)
+    void exportPDF(uint64_t, const PrintInfo&, uint32_t first, uint32_t count, bool printBackgrounds, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&, String&&)>&&);
+    void cancelPDFExport(uint64_t);
+#endif
     void beginPrinting(WebFrameProxy*, const PrintInfo&);
     void endPrinting(CompletionHandler<void()>&& = [] { });
     std::optional<IPC::AsyncReplyID> computePagesForPrinting(WebCore::FrameIdentifier, const PrintInfo&, CompletionHandler<void(const Vector<WebCore::IntRect>&, double, const WebCore::FloatBoxExtent&)>&&);
@@ -4227,6 +4231,9 @@ private:
     double m_pageLength { 0 };
     double m_gapBetweenPages { 0 };
 
+#if PLATFORM(WPE) && USE(SKIA)
+    std::optional<std::pair<uint64_t, WebCore::FrameIdentifier>> m_pdfExportFrame;
+#endif
     std::optional<WebCore::FrameIdentifier> m_printingFrameID;
 
     // Whether WebPageProxy::close() has been called on this page.

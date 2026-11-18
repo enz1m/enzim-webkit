@@ -1527,6 +1527,10 @@ public:
     void stageModeSessionDidEnd(std::optional<WebCore::NodeIdentifier>);
 #endif
 
+#if PLATFORM(WPE) && USE(SKIA)
+    void exportPDF(uint64_t, WebCore::FrameIdentifier, const PrintInfo&, uint32_t first, uint32_t count, bool printBackgrounds, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&, String&&)>&&);
+    void cancelPDFExport(uint64_t);
+#endif
     void beginPrinting(WebCore::FrameIdentifier, const PrintInfo&);
     void beginPrintingDuringDOMPrintOperation(WebCore::FrameIdentifier frameID, const PrintInfo& printInfo) { beginPrinting(frameID, printInfo); }
     void endPrinting(CompletionHandler<void()>&& = [] { });
@@ -3162,6 +3166,12 @@ private:
     };
 
     friend class PrintContextAccessScope;
+#if PLATFORM(WPE) && USE(SKIA)
+    struct PDFExport;
+    std::unique_ptr<PDFExport> m_pdfExport;
+    void drawNextPDFPage(uint64_t);
+    void finishPDFExport(uint64_t, RefPtr<WebCore::SharedBuffer>&&, String&&);
+#endif
 
 #if PLATFORM(GTK)
     std::unique_ptr<WebPrintOperationGtk> m_printOperation;

@@ -65,6 +65,9 @@ public:
     WEBCORE_EXPORT ~Geolocation();
 
     WEBCORE_EXPORT void resetAllGeolocationPermission();
+#if PLATFORM(WPE)
+    WEBCORE_EXPORT void revokePermission();
+#endif
     Document* LEGACY_NODELETE document() const;
 
     void getCurrentPosition(Ref<PositionCallback>&&, RefPtr<PositionErrorCallback>&&, PositionOptions&&);

@@ -236,8 +236,55 @@ void Geolocation::resumeTimerFired()
     }
 }
 
+#if PLATFORM(WPE)
+void Geolocation::revokePermission()
+{
+    Ref protectedThis { *this };
+    GeoNotifierSet retired;
+    for (auto& notifier : m_oneShots)
+        retired.add(notifier.copyRef());
+    GeoNotifierVector watchers;
+    m_watchers.getNotifiersVector(watchers);
+    copyToSet(watchers, retired);
+    for (auto& notifier : m_pendingForPermissionNotifiers)
+        retired.add(notifier.copyRef());
+    for (auto& notifier : m_requestsAwaitingCachedPosition)
+        retired.add(notifier.copyRef());
+
+    if (RefPtr page = this->page()) {
+        if (CheckedPtr controller = GeolocationController::from(page.get()))
+            controller->cancelPermissionRequest(*this);
+    }
+    stopUpdating();
+    for (auto& notifier : retired) {
+        notifier->setFatalError(GeolocationPositionError::create(GeolocationPositionError::PERMISSION_DENIED, permissionDeniedErrorMessage));
+        notifier->stopTimer();
+    }
+    m_oneShots.clear();
+    m_watchers.clear();
+    m_pendingForPermissionNotifiers.clear();
+    m_requestsAwaitingCachedPosition.clear();
+    resetIsAllowed();
+    m_lastPosition = nullptr;
+    m_errorWaitingForResume = nullptr;
+    m_hasChangedPosition = false;
+    m_resetOnResume = false;
+    // Retain retired notifiers until the document can deliver their terminal errors.
+    if (!retired.isEmpty()) {
+        queueTaskKeepingObjectAlive(*this, TaskSource::Geolocation, [notifiers = copyToVector(retired)](auto&) {
+            for (auto& notifier : notifiers)
+                notifier->timerFired();
+        });
+    }
+}
+#endif
+
 void Geolocation::resetAllGeolocationPermission()
 {
+#if PLATFORM(WPE)
+    if (m_allowGeolocation == AllowGeolocation::InProgress)
+        return;
+#endif
     if (m_isSuspended) {
         m_resetOnResume = true;
         return;

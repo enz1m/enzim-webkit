@@ -53,6 +53,14 @@
 #include <WebCore/VisiblePosition.h>
 #include <WebCore/VisibleUnits.h>
 #include <wtf/text/MakeString.h>
+#if PLATFORM(WPE) && ENABLE(GEOLOCATION)
+#include <WebCore/BackForwardCache.h>
+#include <WebCore/Geolocation.h>
+#include <WebCore/GeolocationController.h>
+#include <WebCore/LocalDOMWindow.h>
+#include <WebCore/NavigatorGeolocation.h>
+#endif
+
 
 #if ENABLE(2022_GLIB_API)
 #include "WebKitWebProcessExtension.h"
@@ -103,6 +111,41 @@ void WebPage::platformDetach()
 
 void WebPage::sendMessageToWebProcessExtensionWithReply(UserMessage&& message, CompletionHandler<void(UserMessage&&)>&& completionHandler)
 {
+#if PLATFORM(WPE) && ENABLE(GEOLOCATION)
+    bool revokeGeolocation = message.name == String("enzui-geolocation-revoke-v1"_s).utf8();
+    bool resetGeolocation = message.name == String("enzui-geolocation-reset-v1"_s).utf8();
+    if (revokeGeolocation || resetGeolocation) {
+        RefPtr page = corePage();
+        if (message.type != UserMessage::Type::Message || message.parameters || message.fileDescriptors || !page) {
+            completionHandler(UserMessage(message.name, WEBKIT_USER_MESSAGE_UNHANDLED_MESSAGE));
+            return;
+        }
+        BackForwardCache::singleton().removeAllItemsForPage(*page);
+        Vector<Ref<Geolocation>> geolocations;
+        page->forEachLocalFrame([&](LocalFrame& frame) {
+            if (RefPtr window = frame.window()) {
+                if (RefPtr geolocation = NavigatorGeolocation::optionalGeolocation(window->navigator()))
+                    geolocations.append(geolocation.releaseNonNull());
+            }
+        });
+        for (Ref geolocation : geolocations) {
+            if (resetGeolocation) {
+                if (!geolocation->isAllowed())
+                    geolocation->resetAllGeolocationPermission();
+                continue;
+            }
+            geolocation->revokePermission();
+        }
+        // Error callbacks can navigate; no cached permitted document may survive this barrier.
+        BackForwardCache::singleton().removeAllItemsForPage(*page);
+        UserMessage reply;
+        reply.type = UserMessage::Type::Message;
+        reply.name = revokeGeolocation ? String("enzui-geolocation-revoked-v1"_s).utf8() : String("enzui-geolocation-reset-done-v1"_s).utf8();
+        reply.parameters = adoptGRef(g_variant_ref_sink(g_variant_new_uint32(1)));
+        completionHandler(WTF::move(reply));
+        return;
+    }
+#endif
     auto* extension = WebProcessExtensionManager::singleton().extension();
     if (!extension) {
         completionHandler(UserMessage(message.name, WEBKIT_USER_MESSAGE_UNHANDLED_MESSAGE));

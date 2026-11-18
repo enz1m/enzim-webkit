@@ -526,6 +526,11 @@ messages -> WebPage WantsAsyncDispatchMessage {
     SwipeAnimationDidStart()
     SwipeAnimationDidEnd()
 
+#if PLATFORM(WPE) && USE(SKIA)
+    ExportPDF(uint64_t identifier, WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo, uint32_t first, uint32_t count, bool printBackgrounds) -> (RefPtr<WebCore::SharedBuffer> data, String error)
+    CancelPDFExport(uint64_t identifier)
+#endif
+
     # Printing.
     BeginPrinting(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo)
     BeginPrintingDuringDOMPrintOperation(WebCore::FrameIdentifier frameID, struct WebKit::PrintInfo printInfo) AllowedWhenWaitingForSyncReplyDuringUnboundedIPC

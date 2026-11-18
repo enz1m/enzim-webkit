@@ -529,7 +529,72 @@
 #include <WebKitAdditions/WebPreferencesDefaultValuesAdditions.h>
 #endif
 
+#if PLATFORM(WPE) && USE(SKIA)
+#include <WebCore/GraphicsContextSkia.h>
+#include <cmath>
+#include <wtf/TZoneMallocInlines.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/core/SkDocument.h>
+#include <skia/core/SkStream.h>
+#include <skia/docs/SkPDFDocument.h>
+#include <skia/docs/SkPDFJpegHelpers.h>
+WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+#endif
+
 namespace WebKit {
+
+#if PLATFORM(WPE) && USE(SKIA)
+struct WebPage::PDFExport {
+    WTF_MAKE_TZONE_ALLOCATED_INLINE(PDFExport);
+public:
+    class Stream final : public SkWStream {
+    public:
+        bool write(const void* data, size_t size) final
+        {
+            if (size > maximumBytes - buffer.bytesWritten()) {
+                failed = true;
+                return false;
+            }
+            if (!buffer.write(data, size)) {
+                failed = true;
+                return false;
+            }
+            return true;
+        }
+        size_t bytesWritten() const final { return buffer.bytesWritten(); }
+        static constexpr size_t maximumBytes = 64 * 1024 * 1024;
+        SkDynamicMemoryWStream buffer;
+        bool failed { false };
+    };
+
+    PDFExport(uint64_t identifier, WebCore::FrameIdentifier frameID, WebCore::Document* document, const PrintInfo& info,
+        uint32_t first, uint32_t count, bool oldPrintBackgrounds, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&, String&&)>&& completion)
+        : identifier(identifier)
+        , frameID(frameID)
+        , document(document)
+        , info(info)
+        , first(first)
+        , count(count)
+        , oldPrintBackgrounds(oldPrintBackgrounds)
+        , completion(WTF::move(completion))
+    {
+    }
+
+    uint64_t identifier;
+    WebCore::FrameIdentifier frameID;
+    RefPtr<WebCore::Document> document;
+    PrintInfo info;
+    uint32_t first;
+    uint32_t count;
+    uint32_t next { 0 };
+    bool oldPrintBackgrounds;
+    bool cancelled { false };
+    String setupError;
+    Stream stream;
+    sk_sp<SkDocument> pdf;
+    CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&, String&&)> completion;
+};
+#endif
 using namespace WebCore;
 
 static const Seconds pageScrollHysteresisDuration { 300_ms };
@@ -2378,6 +2443,10 @@ void WebPage::close(CompletionHandler<void()>&& completionHandler)
         networkProcessConnection->connection().send(Messages::NetworkConnectionToWebProcess::ClearPageSpecificData(m_identifier), 0);
 
     m_isClosed = true;
+#if PLATFORM(WPE) && USE(SKIA)
+    if (m_pdfExport)
+        finishPDFExport(m_pdfExport->identifier, nullptr, "Page closed during PDF export"_s);
+#endif
 
     // If there is still no URL, then we never loaded anything in this page, so nothing to report.
     if (!m_mainFrame->url().isEmpty())
@@ -7359,6 +7428,171 @@ void WebPage::swipeAnimationDidEnd()
     corePage()->setIsInSwipeAnimation(false);
 }
 
+#if PLATFORM(WPE) && USE(SKIA)
+static bool hasRemotePDFFrame(const LocalFrame& root)
+{
+    for (auto* frame = root.tree().traverseNext(&root); frame; frame = frame->tree().traverseNext(&root)) {
+        if (!is<LocalFrame>(*frame))
+            return true;
+    }
+    return false;
+}
+
+void WebPage::exportPDF(uint64_t identifier, FrameIdentifier frameID, const PrintInfo& info, uint32_t first, uint32_t count, bool printBackgrounds, CompletionHandler<void(RefPtr<SharedBuffer>&&, String&&)>&& completion)
+{
+    if (m_isClosed || m_pdfExport || m_printContext || !identifier || first >= 256 || count > 256
+        || !std::isfinite(info.availablePaperWidth) || !std::isfinite(info.availablePaperHeight)
+        || !std::isfinite(info.pageSetupScaleFactor) || info.availablePaperWidth < 36 || info.availablePaperWidth > 14400
+        || info.availablePaperHeight < 36 || info.availablePaperHeight > 14400
+        || info.pageSetupScaleFactor < 0.1 || info.pageSetupScaleFactor > 4) {
+        completion(nullptr, "Invalid or unavailable PDF export"_s);
+        return;
+    }
+    for (float margin : { info.margin.top(), info.margin.right(), info.margin.bottom(), info.margin.left() }) {
+        if (!std::isfinite(margin) || margin < 0 || margin > 14400) {
+            completion(nullptr, "Invalid PDF export margin"_s);
+            return;
+        }
+    }
+    if (info.availablePaperWidth + info.margin.left() + info.margin.right() > 14400
+        || info.availablePaperHeight + info.margin.top() + info.margin.bottom() > 14400) {
+        completion(nullptr, "PDF paper size exceeds export limits"_s);
+        return;
+    }
+    RefPtr frame = WebProcess::singleton().webFrame(frameID);
+    RefPtr localFrame = frame ? frame->coreLocalFrame() : nullptr;
+    if (!localFrame || frameID != m_mainFrame->frameID() || !localFrame->document()) {
+        completion(nullptr, "No printable main document"_s);
+        return;
+    }
+    if (hasRemotePDFFrame(*localFrame)) {
+        completion(nullptr, "PDF export of remote frames is not supported"_s);
+        return;
+    }
+    m_pdfExport = makeUnique<PDFExport>(identifier, frameID, localFrame->document(), info, first, count,
+        corePage()->settings().shouldPrintBackgrounds(), WTF::move(completion));
+    corePage()->settings().setShouldPrintBackgrounds(printBackgrounds);
+    beginPrinting(frameID, info);
+    if (!m_pdfExport)
+        return;
+    if (!m_pdfExport->setupError.isEmpty()) {
+        auto error = std::exchange(m_pdfExport->setupError, { });
+        finishPDFExport(identifier, nullptr, WTF::move(error));
+        return;
+    }
+    if (!m_printContext || m_isClosed || m_pdfExport->cancelled || localFrame->document() != m_pdfExport->document) {
+        finishPDFExport(identifier, nullptr, "Document changed during PDF setup"_s);
+        return;
+    }
+    auto total = m_printContext->pageCount();
+    if (!total || total > 256 || first >= total) {
+        finishPDFExport(identifier, nullptr, "PDF page range exceeds export limits"_s);
+        return;
+    }
+    m_pdfExport->count = count ? std::min<uint32_t>(count, total - first) : total - first;
+    SkPDF::Metadata metadata;
+    metadata.jpegDecoder = SkPDF::JPEG::Decode;
+    metadata.jpegEncoder = SkPDF::JPEG::Encode;
+    m_pdfExport->pdf = SkPDF::MakeDocument(&m_pdfExport->stream, metadata);
+    if (!m_pdfExport->pdf) {
+        finishPDFExport(identifier, nullptr, "Cannot create PDF document"_s);
+        return;
+    }
+    RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, identifier] { protectedThis->drawNextPDFPage(identifier); });
+}
+
+void WebPage::drawNextPDFPage(uint64_t identifier)
+{
+    if (!m_pdfExport || m_pdfExport->identifier != identifier)
+        return;
+    RefPtr frame = WebProcess::singleton().webFrame(m_pdfExport->frameID);
+    RefPtr localFrame = frame ? frame->coreLocalFrame() : nullptr;
+    if (m_isClosed || !localFrame || localFrame->document() != m_pdfExport->document || !m_printContext) {
+        finishPDFExport(identifier, nullptr, "Document changed during PDF export"_s);
+        return;
+    }
+    if (hasRemotePDFFrame(*localFrame)) {
+        finishPDFExport(identifier, nullptr, "PDF export of remote frames is not supported"_s);
+        return;
+    }
+    auto& job = *m_pdfExport;
+    auto margin = m_printContext->computedPageMargin(job.info.margin);
+    auto content = m_printContext->computedPageSize(FloatSize(job.info.availablePaperWidth, job.info.availablePaperHeight), job.info.margin);
+    float paperWidth = job.info.availablePaperWidth + job.info.margin.left() + job.info.margin.right();
+    float paperHeight = job.info.availablePaperHeight + job.info.margin.top() + job.info.margin.bottom();
+    if (!std::isfinite(content.width()) || !std::isfinite(content.height()) || content.width() < 1 || content.height() < 1) {
+        finishPDFExport(identifier, nullptr, "Invalid computed PDF page geometry"_s);
+        return;
+    }
+    auto* canvas = job.pdf->beginPage(paperWidth, paperHeight);
+    if (!canvas) {
+        finishPDFExport(identifier, nullptr, "Cannot create PDF page"_s);
+        return;
+    }
+    canvas->save();
+    canvas->translate(margin.left(), margin.top());
+    canvas->clipRect(SkRect::MakeWH(content.width(), content.height()));
+    {
+        PrintContextAccessScope scope { *this };
+        RefPtr printContext = m_printContext;
+        canvas->scale(job.info.pageSetupScaleFactor, job.info.pageSetupScaleFactor);
+        WebCore::GraphicsContextSkia context(*canvas, WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
+        printContext->spoolPage(context, job.first + job.next, content.width() / job.info.pageSetupScaleFactor);
+    }
+    if (job.cancelled || m_isClosed || localFrame->document() != job.document || hasRemotePDFFrame(*localFrame)) {
+        finishPDFExport(identifier, nullptr, "PDF export interrupted"_s);
+        return;
+    }
+    canvas->restore();
+    job.pdf->endPage();
+    ++job.next;
+    if (job.stream.failed) {
+        finishPDFExport(identifier, nullptr, "PDF exceeds 64 MiB export limit"_s);
+        return;
+    }
+    if (job.next == job.count) {
+        job.pdf->close();
+        if (job.stream.failed) {
+            finishPDFExport(identifier, nullptr, "PDF exceeds 64 MiB export limit"_s);
+            return;
+        }
+        auto data = SharedBuffer::create(job.stream.buffer.detachAsData());
+        finishPDFExport(identifier, WTF::move(data), { });
+        return;
+    }
+    RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, identifier] { protectedThis->drawNextPDFPage(identifier); });
+}
+
+void WebPage::finishPDFExport(uint64_t identifier, RefPtr<SharedBuffer>&& data, String&& error)
+{
+    if (!m_pdfExport || m_pdfExport->identifier != identifier)
+        return;
+    if (m_inActivePrintContextAccessScope) {
+        m_pdfExport->cancelled = true;
+        return;
+    }
+    auto job = std::exchange(m_pdfExport, nullptr);
+    if (const char* trace = getenv("WPE_PDF_EXPORT_TRACE"); trace && *trace == '1') {
+        size_t rectangles = m_printContext ? m_printContext->pageCount() : 0;
+        WTFLogAlways("ENZUI_PDF_EXPORT id=%llu pages=%u rects=%zu success=%d", static_cast<unsigned long long>(identifier), job->next, rectangles, !!data);
+    }
+    if (job->pdf && !data)
+        job->pdf->abort();
+    if (m_page)
+        m_page->settings().setShouldPrintBackgrounds(job->oldPrintBackgrounds);
+    if (m_isClosed)
+        m_printContext = nullptr;
+    else
+        endPrinting();
+    job->completion(WTF::move(data), WTF::move(error));
+}
+
+void WebPage::cancelPDFExport(uint64_t identifier)
+{
+    finishPDFExport(identifier, nullptr, "PDF export cancelled"_s);
+}
+#endif
+
 void WebPage::beginPrinting(FrameIdentifier frameID, const PrintInfo& printInfo)
 {
     RELEASE_LOG(Printing, "Begin printing.");
@@ -7383,10 +7617,25 @@ void WebPage::beginPrinting(FrameIdentifier frameID, const PrintInfo& printInfo)
         protect(corePage())->dispatchBeforePrintEvent();
     }
     RefPtr printContext = m_printContext;
+#if PLATFORM(WPE) && USE(SKIA)
+    if (m_pdfExport && (!printContext || m_isClosed || m_pdfExport->cancelled || coreFrame->document() != m_pdfExport->document || hasRemotePDFFrame(*coreFrame))) {
+        m_pdfExport->setupError = "Document changed or contains remote frames during PDF setup"_s;
+        return;
+    }
+#endif
 
     freezeLayerTree(LayerTreeFreezeReason::Printing);
 
     auto computedPageSize = printContext->computedPageSize(FloatSize(printInfo.availablePaperWidth, printInfo.availablePaperHeight), printInfo.margin);
+#if PLATFORM(WPE) && USE(SKIA)
+    if (m_pdfExport && (!std::isfinite(computedPageSize.width()) || !std::isfinite(computedPageSize.height())
+        || computedPageSize.width() < 36 || computedPageSize.height() < 36
+        || computedPageSize.width() > 14400 || computedPageSize.height() > 14400)) {
+        m_pdfExport->setupError = "CSS PDF page geometry exceeds export limits"_s;
+        unfreezeLayerTree(LayerTreeFreezeReason::Printing);
+        return;
+    }
+#endif
 
     printContext->begin(computedPageSize.width(), computedPageSize.height());
 
@@ -7399,6 +7648,37 @@ void WebPage::beginPrinting(FrameIdentifier frameID, const PrintInfo& printInfo)
         return;
     }
 
+#if PLATFORM(WPE) && USE(SKIA)
+    if (m_pdfExport) {
+        RefPtr document = coreFrame->document();
+        CheckedPtr renderer = document ? document->renderView() : nullptr;
+        if (!renderer || m_isClosed || m_pdfExport->cancelled || document != m_pdfExport->document || hasRemotePDFFrame(*coreFrame)) {
+            m_pdfExport->setupError = "Document changed or contains remote frames during PDF layout"_s;
+            return;
+        }
+        const auto& documentRect = renderer->documentRect();
+        auto pageSize = coreFrame->resizePageRectsKeepingRatio(computedPageSize, FloatSize(documentRect.width(), documentRect.height()));
+        float userScaleFactor = printInfo.pageSetupScaleFactor;
+        double pageWidth = std::trunc(pageSize.width() / userScaleFactor);
+        double pageHeight = std::trunc(pageSize.height() / userScaleFactor);
+        if (!std::isfinite(pageWidth) || !std::isfinite(pageHeight) || pageWidth < 1 || pageHeight < 1
+            || pageWidth > std::numeric_limits<int>::max() || pageHeight > std::numeric_limits<int>::max()) {
+            m_pdfExport->setupError = "PDF pagination has degenerate geometry"_s;
+            return;
+        }
+        bool horizontal = renderer->writingMode().isHorizontal();
+        int logicalHeight = horizontal ? documentRect.height() : documentRect.width();
+        int logicalPageHeight = horizontal ? pageHeight : pageWidth;
+        double logicalWidth = horizontal ? documentRect.width() : documentRect.height();
+        double logicalPageWidth = horizontal ? pageWidth : pageHeight;
+        // Match PrintContext's float block count and integer inline tiling before allocation.
+        double blockPages = std::ceil(static_cast<float>(logicalHeight) / logicalPageHeight);
+        if (blockPages * std::ceil(logicalWidth / logicalPageWidth) > 256) {
+            m_pdfExport->setupError = "PDF pagination exceeds 256 pages"_s;
+            return;
+        }
+    }
+#endif
     float fullPageHeight;
     printContext->computePageRects(FloatRect(0, 0, computedPageSize.width(), computedPageSize.height()), 0, 0, printInfo.pageSetupScaleFactor, fullPageHeight, true);
 
