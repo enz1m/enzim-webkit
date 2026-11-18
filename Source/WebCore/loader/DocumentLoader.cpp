@@ -2283,7 +2283,11 @@ void DocumentLoader::startLoadingMainResource()
         }
 
         // If this is a reload the cache layer might have made the previous request conditional. DocumentLoader can't handle 304 responses itself.
+        // If-Range never yields 304: it selects 206 or the whole entity, so keep it with an explicit Range.
+        auto ifRange = request.hasHTTPHeaderField(HTTPHeaderName::Range) ? request.httpHeaderField(HTTPHeaderName::IfRange) : String();
         request.makeUnconditional();
+        if (!ifRange.isEmpty())
+            request.setHTTPHeaderField(HTTPHeaderName::IfRange, ifRange);
 
         DOCUMENTLOADER_RELEASE_LOG_FORWARDABLE(DocumentLoaderStartLoadingMainResourceStartingLoad);
 
