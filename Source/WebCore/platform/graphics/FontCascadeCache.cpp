@@ -30,12 +30,26 @@
 #include "config.h"
 #include "FontCascadeCache.h"
 
+#include "CSSFontFace.h"
+#include "CSSFontFaceSet.h"
+#include "CSSFontFamilyNameValue.h"
 #include "CSSFontSelector.h"
+#include "CSSSegmentedFontFace.h"
+#include "DocumentSettingsValues.h"
 #include "FontCache.h"
+#include "FontCascadeCacheInvalidation.h"
 #include "FontCascadeDescription.h"
+#include "ScriptExecutionContext.h"
 #include "TextShapingResultAndDisplayList.h"
+#include "WebKitFontFamilyNames.h"
+#include <cstdlib>
+#include <ranges>
+#include <wtf/DataLog.h>
+#include <wtf/MainThread.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/text/StringView.h>
 
 namespace WebCore {
 
@@ -116,17 +130,117 @@ FontCascadeCacheKey makeFontCascadeCacheKey(const FontCascadeDescription& descri
     };
 }
 
+namespace {
+
+struct FontLoadTransition {
+    unsigned selectorID;
+    unsigned version;
+    AtomString family;
+    WeakPtr<CSSFontFace> face;
+};
+
+bool fontCascadeReuseEnabled()
+{
+#if PLATFORM(WPE) && USE(SKIA)
+    static const bool enabled = StringView::fromLatin1(std::getenv("WPE_FONT_CASCADE_REUSE")) != "0"_s;
+    return enabled && isMainThread();
+#else
+    return false;
+#endif
+}
+
+Vector<FontLoadTransition>& fontLoadTransitions()
+{
+    ASSERT(isMainThread());
+    static NeverDestroyed<Vector<FontLoadTransition>> transitions;
+    return transitions;
+}
+
+bool fontLoadAffectsCascade(CSSFontSelector& selector, const FontCascadeDescription& description, const FontLoadTransition& transition)
+{
+    RefPtr face = transition.face.get();
+    RefPtr context = selector.scriptExecutionContext();
+    if (!face || !context)
+        return true;
+
+    bool familyMatches = false;
+    for (unsigned index = 0; index < description.familyCount(); ++index) {
+        auto& family = description.familyAt(index);
+        if (family.isGeneric() && family.name == "math"_s)
+            return true;
+        if (FontCascadeDescription::familyNamesAreEqual(family.name, transition.family))
+            familyMatches = true;
+    }
+    // Standard-family preferences can resolve to downloadable fonts before face selection.
+    const auto& genericFamilies = context->settingsValues().fontGenericFamilies;
+    for (size_t index = 0; index < WebKitFontFamilyNames::familyNamesData->size(); ++index) {
+        auto* generic = genericFamilies.fontFamily(static_cast<WebKitFontFamilyNames::FamilyNamesIndex>(index), description.script());
+        if (generic && !generic->isEmpty() && FontCascadeDescription::familyNamesAreEqual(AtomString(*generic), transition.family))
+            familyMatches = true;
+    }
+    if (!familyMatches)
+        return false;
+
+    RefPtr selected = selector.cssFontFaceSet().fontFace(description.fontSelectionRequest(), transition.family);
+    if (!selected)
+        return true;
+    return std::ranges::any_of(selected->constituentFaces(), [&](auto& selectedFace) {
+        return selectedFace.ptr() == face.get();
+    });
+}
+
+}
+
+void recordFontLoadForCascadeCache(CSSFontSelector& selector, CSSFontFace& face)
+{
+    if (!fontCascadeReuseEnabled() || face.status() != CSSFontFace::Status::Success)
+        return;
+    RefPtr value = dynamicDowncast<CSSFontFamilyNameValue>(face.familyCSSValue());
+    if (!value)
+        return;
+    AtomString family = value->fontFamilyName().value;
+    if (family.isEmpty() || family.length() > 256 || selector.version() == std::numeric_limits<unsigned>::max())
+        return;
+    auto& transitions = fontLoadTransitions();
+    if (transitions.size() == 64)
+        transitions.removeAt(0);
+    transitions.append({ selector.uniqueId(), selector.version() + 1, family, WeakPtr { face } });
+}
+
 Ref<FontCascadeFonts> FontCascadeCache::retrieveOrAddCachedFonts(const FontCascadeDescription& fontDescription, FontSelector* fontSelector)
 {
     auto key = makeFontCascadeCacheKey(fontDescription, fontSelector);
-    auto addResult = m_entries.add(key, nullptr);
-    if (!addResult.isNewEntry)
-        return addResult.iterator->value->fonts.get();
+    if (auto iterator = m_entries.find(key); iterator != m_entries.end())
+        return iterator->value->fonts.get();
 
-    auto& newEntry = addResult.iterator->value;
-    newEntry = makeUnique<FontCascadeCacheEntry>(FontCascadeCacheEntry { WTF::move(key), FontCascadeFonts::create() });
-    Ref<FontCascadeFonts> fonts = newEntry->fonts.get();
-
+    std::unique_ptr<FontCascadeCacheEntry> entry;
+    if (fontCascadeReuseEnabled() && key.hasComplexFontSelector) {
+        if (auto* selector = dynamicDowncast<CSSFontSelector>(fontSelector)) {
+            auto previousKey = key;
+            for (auto& transition : std::views::reverse(fontLoadTransitions())) {
+                if (transition.selectorID != key.fontSelectorId || transition.version != previousKey.fontSelectorVersion)
+                    continue;
+                if (fontLoadAffectsCascade(*selector, fontDescription, transition))
+                    break;
+                --previousKey.fontSelectorVersion;
+                entry = m_entries.take(previousKey);
+                if (entry)
+                    break;
+            }
+        }
+    }
+    static const bool trace = StringView::fromLatin1(std::getenv("WPE_FONT_CASCADE_REUSE_TRACE")) == "1"_s;
+    static unsigned traceBudget = 256;
+    if (trace && isMainThread() && traceBudget) {
+        --traceBudget;
+        dataLogLn("WPE_FONT_CASCADE_REUSE reused=", !!entry);
+    }
+    if (entry)
+        entry->key = key;
+    else
+        entry = makeUnique<FontCascadeCacheEntry>(FontCascadeCacheEntry { key, FontCascadeFonts::create() });
+    Ref<FontCascadeFonts> fonts = entry->fonts.get();
+    m_entries.add(WTF::move(key), WTF::move(entry));
 
 #if !PLATFORM(IOS_FAMILY)
     static constexpr unsigned unreferencedPruneInterval = 1000;

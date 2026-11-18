@@ -41,6 +41,7 @@
 #include "DocumentSettingsValues.h"
 #include "Font.h"
 #include "FontCache.h"
+#include "FontCascadeCacheInvalidation.h"
 #include "FontCascadeDescription.h"
 #include "FontFace.h"
 #include "FontFaceSet.h"
@@ -52,10 +53,13 @@
 #include "StyleProperties.h"
 #include "StyleResolver.h"
 #include "StyleRule.h"
+#include <cstdlib>
+#include <wtf/DataLog.h>
 #include <wtf/OrderedHashSet.h>
 #include <wtf/Ref.h>
 #include <wtf/SetForScope.h>
 #include <wtf/text/AtomString.h>
+#include <wtf/text/StringView.h>
 
 namespace WebCore {
 
@@ -314,8 +318,23 @@ void CSSFontSelector::opportunisticallyStartFontDataURLLoading(const FontCascade
         face->opportunisticallyStartFontDataURLLoading(trustedType);
 }
 
-void CSSFontSelector::fontLoaded(CSSFontFace&)
+void CSSFontSelector::fontLoaded(CSSFontFace& face)
 {
+#if PLATFORM(WPE) && USE(SKIA)
+    static const bool suppressBuildInvalidation = StringView::fromLatin1(std::getenv("WPE_FONT_BUILD_INVALIDATION")) != "1"_s;
+    if (suppressBuildInvalidation && m_creatingFont) {
+        // The new face is not registered yet; addFontFaceRule advances the selector version.
+        static const bool trace = StringView::fromLatin1(std::getenv("WPE_FONT_BUILD_INVALIDATION_TRACE")) == "1"_s;
+        static thread_local unsigned traceBudget = 16;
+        if (trace && traceBudget) {
+            --traceBudget;
+            dataLogLn("WPE_FONT_BUILD_INVALIDATION skipped=true");
+        }
+        return;
+    }
+#endif
+    if (!m_creatingFont && !m_buildIsUnderway)
+        recordFontLoadForCascadeCache(*this, face);
     dispatchInvalidationCallbacks();
 }
 

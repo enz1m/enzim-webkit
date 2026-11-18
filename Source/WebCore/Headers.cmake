@@ -2441,6 +2441,7 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     platform/graphics/FontCache.h
     platform/graphics/FontCascade.h
     platform/graphics/FontCascadeCache.h
+    platform/graphics/FontCascadeCacheInvalidation.h
     platform/graphics/FontCascadeDescription.h
     platform/graphics/FontCascadeEnums.h
     platform/graphics/FontCascadeFonts.h

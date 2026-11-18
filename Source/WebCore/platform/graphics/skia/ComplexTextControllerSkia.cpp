@@ -35,6 +35,10 @@
 #include <hb-icu.h>
 #include <hb-ot.h>
 #include <hb.h>
+#include <cstdlib>
+#include <wtf/ASCIICType.h>
+#include <wtf/DataLog.h>
+#include <wtf/text/StringView.h>
 
 namespace WebCore {
 
@@ -93,6 +97,16 @@ ComplexTextController::ComplexTextRun::ComplexTextRun(hb_buffer_t* buffer, const
 
 static std::optional<UScriptCode> characterScript(char32_t character)
 {
+    static const bool fastASCII = StringView::fromLatin1(std::getenv("WPE_SKIA_ASCII_SCRIPT")) != "0"_s;
+    if (fastASCII && isASCII(character)) {
+        static const bool trace = StringView::fromLatin1(std::getenv("WPE_SKIA_ASCII_SCRIPT_TRACE")) == "1"_s;
+        static thread_local unsigned traceBudget = 64;
+        if (trace && traceBudget) {
+            --traceBudget;
+            dataLogLn("WPE_SKIA_ASCII_SCRIPT fast=true");
+        }
+        return isASCIIAlpha(character) ? USCRIPT_LATIN : USCRIPT_COMMON;
+    }
     UErrorCode errorCode = U_ZERO_ERROR;
     UScriptCode script = uscript_getScript(character, &errorCode);
     if (U_FAILURE(errorCode))
@@ -253,7 +267,22 @@ void ComplexTextController::collectComplexTextRunsForCharacters(std::span<const 
     // The computed "locale" equals the "lang" attribute. The latter must be a valid BCP 47 language tag,
     // according to <https://html.spec.whatwg.org/multipage/dom.html#attr-lang>.
     // This is exactly what hb_language_from_string() expects, so we can pass directly.
-    auto language = hb_language_from_string(m_fontCascade->fontDescription().usedLocale().string().utf8().legacyCStringPointer(), -1);
+    static const bool cacheLanguage = StringView::fromLatin1(std::getenv("WPE_SKIA_LANGUAGE_CACHE")) != "0"_s;
+    static thread_local AtomString previousLocale;
+    static thread_local hb_language_t previousLanguage = HB_LANGUAGE_INVALID;
+    const auto& locale = m_fontCascade->fontDescription().usedLocale();
+    bool hit = cacheLanguage && previousLanguage && locale == previousLocale;
+    auto language = hit ? previousLanguage : hb_language_from_string(locale.string().utf8().legacyCStringPointer(), -1);
+    if (cacheLanguage && !hit && locale.length() <= 256) {
+        previousLocale = locale;
+        previousLanguage = language;
+    }
+    static const bool traceLanguage = StringView::fromLatin1(std::getenv("WPE_SKIA_LANGUAGE_CACHE_TRACE")) == "1"_s;
+    static thread_local unsigned traceBudget = 64;
+    if (traceLanguage && traceBudget) {
+        --traceBudget;
+        dataLogLn("WPE_SKIA_LANGUAGE_CACHE hit=", hit);
+    }
 
     auto shapeFunction = [&](const HBRun& run) {
         hb_buffer_set_cluster_level(buffer.get(), HB_BUFFER_CLUSTER_LEVEL_CHARACTERS);
