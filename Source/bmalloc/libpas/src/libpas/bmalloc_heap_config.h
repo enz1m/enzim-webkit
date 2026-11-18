@@ -46,9 +46,15 @@ PAS_BEGIN_EXTERN_C;
 // Retain the object-size cutoff when reducing Linux backing-page size.
 #define BMALLOC_SMALL_SEGREGATED_MAX_OBJECT_SIZE PAS_MAX_OBJECT_SIZE(PAS_BASIC_SEGREGATED_PAYLOAD_SIZE_EXCLUSIVE( \
     BMALLOC_MINALIGN_SHIFT, PAS_SMALL_PAGE_DEFAULT_SIZE, PAS_SMALL_PAGE_DEFAULT_SIZE))
+// A small page that has run full is offered for allocation again when any of its objects is freed,
+// not only when a whole word of its allocation bits, 512 bytes of objects, has emptied. Waiting
+// leaves the holes between long-lived small objects unused: a loaded page's process held 15 MiB
+// of them, against 6 MiB this way.
+#define BMALLOC_SMALL_EXCLUSIVE_EMPTY_WORD_ELIGIBILITY false
 #else
 #define BMALLOC_SMALL_SEGREGATED_PAGE_SIZE PAS_SMALL_PAGE_DEFAULT_SIZE
 #define BMALLOC_SMALL_SEGREGATED_MAX_OBJECT_SIZE 0
+#define BMALLOC_SMALL_EXCLUSIVE_EMPTY_WORD_ELIGIBILITY true
 #endif
 
 PAS_API void bmalloc_heap_config_activate(void);
@@ -66,7 +72,7 @@ PAS_API void bmalloc_heap_config_activate(void);
     .small_segregated_max_object_size = BMALLOC_SMALL_SEGREGATED_MAX_OBJECT_SIZE, \
     .small_segregated_wasteage_handicap = PAS_SMALL_PAGE_HANDICAP, \
     .small_exclusive_segregated_logging_mode = pas_segregated_deallocation_size_oblivious_logging_mode, \
-    .small_exclusive_segregated_enable_empty_word_eligibility_optimization = true, \
+    .small_exclusive_segregated_enable_empty_word_eligibility_optimization = BMALLOC_SMALL_EXCLUSIVE_EMPTY_WORD_ELIGIBILITY, \
     .small_segregated_use_reversed_current_word = PAS_ARM64, \
     .enable_view_cache = true, \
     .use_small_bitfit = true, \
