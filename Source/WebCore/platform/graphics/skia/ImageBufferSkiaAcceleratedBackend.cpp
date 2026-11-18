@@ -37,8 +37,11 @@
 #include "PixelBufferConversion.h"
 #include "PlatformDisplay.h"
 #include "ProcessCapabilities.h"
+#include "SkiaCanvasPolicy.h"
 #include "SkiaRecordingResult.h"
 #include "SkiaUtilities.h"
+#include <wtf/DataLog.h>
+#include <wtf/text/StringView.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkPixmap.h>
 #include <skia/gpu/ganesh/GrBackendSurface.h>
@@ -89,11 +92,7 @@ static inline bool shouldEnableDynamicMSAA()
             return;
         }
 
-#if PLATFORM(GTK)
-        enableDynamicMSAA = true;
-#else
-        enableDynamicMSAA = false;
-#endif
+        enableDynamicMSAA = defaultEnableDynamicCanvasMSAA();
     });
     return enableDynamicMSAA;
 }
@@ -132,6 +131,12 @@ std::unique_ptr<ImageBufferSkiaAcceleratedBackend> ImageBufferSkiaAcceleratedBac
     if (!surface || !surface->getCanvas())
         return nullptr;
 
+    static const bool trace = StringView::fromLatin1(getenv("WPE_SKIA_CANVAS_MSAA_TRACE")) == "1"_s;
+    static thread_local unsigned traceBudget = 32;
+    if (trace && traceBudget && parameters.purpose == RenderingPurpose::Canvas) {
+        --traceBudget;
+        dataLogLn("WPE_SKIA_CANVAS_MSAA dynamic=", !!(surface->props().flags() & SkSurfaceProps::kDynamicMSAA_Flag), " samples=", msaaSampleCount);
+    }
     return create(parameters, creationContext, WTF::move(surface));
 }
 

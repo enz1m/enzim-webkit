@@ -29,6 +29,7 @@
 #if USE(SKIA)
 #include "FontRenderOptions.h"
 #include "GLContext.h"
+#include "SkiaCanvasPolicy.h"
 
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkColorSpace.h>
@@ -194,6 +195,18 @@ static bool shouldAllowMSAAOnNewIntel()
         allowMSAAOnNewIntel = isNewIntelDevice();
     });
     return allowMSAAOnNewIntel;
+#else
+    return false;
+#endif
+}
+
+bool defaultEnableDynamicCanvasMSAA()
+{
+#if PLATFORM(GTK)
+    return true;
+#elif PLATFORM(WPE)
+    // Embedded and unclassified GPUs retain static MSAA because dynamic MSAA can regress.
+    return shouldAllowMSAAOnNewIntel();
 #else
     return false;
 #endif
