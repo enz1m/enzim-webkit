@@ -26,6 +26,7 @@
  */
 
 #include "config.h"
+#include <cstdlib>
 #include "HTMLPreloadScanner.h"
 
 #include "HTMLImageElement.h"
@@ -553,7 +554,16 @@ void TokenPreloadScanner::scan(const HTMLToken& token, Vector<std::unique_ptr<Pr
         }
         if (tagId == TagId::Picture) {
             m_pictureSourceState.append({ });
-            m_pictureSourceState.last().preloadAllowed = !!document.documentElement();
+            static const bool earlyMediaQueries = [] {
+                if (const char* value = std::getenv("WPE_EARLY_MEDIA_QUERIES"))
+                    return *value != '0';
+#if PLATFORM(WPE)
+                return true;
+#else
+                return false;
+#endif
+            }();
+            m_pictureSourceState.last().preloadAllowed = document.documentElement() || (earlyMediaQueries && document.frame() && document.view() && document.renderView());
             return;
         }
         if (tagId == TagId::Svg) {
@@ -576,7 +586,7 @@ void TokenPreloadScanner::scan(const HTMLToken& token, Vector<std::unique_ptr<Pr
                 return;
         }
 
-        // Media-query evaluation is unknown until the document element exists.
+        // Keep picture selection conservative when initial media-query context is unavailable.
         if ((tagId == TagId::Source || tagId == TagId::Img) && !m_pictureSourceState.isEmpty() && !m_pictureSourceState.last().preloadAllowed)
             return;
 

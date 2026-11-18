@@ -23,6 +23,8 @@
  */
 
 #include "config.h"
+#include <cstdlib>
+#include <wtf/DataLog.h>
 #include "MediaQueryEvaluator.h"
 
 #include "CSSToLengthConversionData.h"
@@ -78,8 +80,25 @@ bool MediaQueryEvaluator::evaluate(const MediaQuery& query) const
         if (!document)
             return m_staticMediaConditionResult;
 
-        if (!document->view() || !document->documentElement())
+        if (!document->view())
             return EvaluationResult::Unknown;
+        if (!document->documentElement()) {
+            static const bool earlyMediaQueries = [] {
+                if (const char* value = std::getenv("WPE_EARLY_MEDIA_QUERIES"))
+                    return *value != '0';
+#if PLATFORM(WPE)
+                return true;
+#else
+                return false;
+#endif
+            }();
+            if (!earlyMediaQueries || !document->frame() || !document->renderView())
+                return EvaluationResult::Unknown;
+            static const bool trace = StringView::fromLatin1(std::getenv("WPE_EARLY_MEDIA_QUERIES_TRACE")) == "1"_s;
+            static unsigned traces;
+            if (trace && traces++ < 32)
+                dataLogLn("WPE media query uses initial style before document element");
+        }
 
         CheckedRef initialStyle = document->initialStyle();
         FeatureEvaluationContext context {
