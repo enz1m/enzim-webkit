@@ -216,6 +216,76 @@ static Seconds LEGACY_NODELETE maximumBufferingTime(CachedResource* resource)
     return 0_s;
 }
 
+// A script named by <link rel=preload> is fetched for later. An HTTP/2 server
+// writes a response into its transport as fast as flow control allows and
+// honours no priority for bytes already written, so the rest of the document
+// and the style sheets it names, asked for moments later on the same
+// connection, arrive behind megabytes of script. The request for such a script
+// is therefore held until the document has arrived, an element waits for the
+// script, or heldScriptPreloadLimit() has passed. The wait costs a page nothing
+// unless it runs the script before its document has arrived, and then at most
+// the time from the link to the element that runs it.
+static constexpr Seconds heldScriptPreloadPoll { 4_ms };
+
+// WPE_SCRIPT_PRELOAD_HOLD_MS sets the limit for a comparison; 0 sends every preload at once.
+static Seconds heldScriptPreloadLimit()
+{
+    static const Seconds limit = [] {
+        if (const char* value = getenv("WPE_SCRIPT_PRELOAD_HOLD_MS"))
+            return Seconds::fromMilliseconds(std::min<unsigned long>(strtoul(value, nullptr, 10), 2000));
+        return Seconds { 200_ms };
+    }();
+    return limit;
+}
+
+struct HeldScriptPreload {
+    Ref<ResourceLoader> loader;
+    WeakPtr<CachedResource> resource;
+    MonotonicTime deadline;
+    Function<void()> start;
+};
+
+static Vector<HeldScriptPreload>& heldScriptPreloads()
+{
+    static NeverDestroyed<Vector<HeldScriptPreload>> held;
+    return held;
+}
+
+static bool shouldHoldScriptPreload(ResourceLoader& resourceLoader, CachedResource* resource)
+{
+    if (!resource || !resource->isLinkPreload() || resource->type() != CachedResource::Type::Script || !heldScriptPreloadLimit())
+        return false;
+    RefPtr documentLoader = resourceLoader.documentLoader();
+    RefPtr frame = resourceLoader.frame();
+    if (!documentLoader || !frame || !frame->isMainFrame() || !documentLoader->isLoadingMainResource())
+        return false;
+    // HTTP/1.1 gives the script a connection of its own.
+    auto& response = documentLoader->response();
+    return response.httpVersion() == "HTTP/2"_s && protocolHostAndPortAreEqual(response.url(), resourceLoader.request().url());
+}
+
+static void startHeldScriptPreloads()
+{
+    auto now = MonotonicTime::now();
+    Vector<Function<void()>> due;
+    heldScriptPreloads().removeAllMatching([&](auto& held) {
+        if (held.loader->reachedTerminalState())
+            return true;
+        RefPtr documentLoader = held.loader->documentLoader();
+        RefPtr resource = held.resource.get();
+        // The link element is the script's one client until an element that runs it asks for it.
+        bool awaited = !resource || resource->numberOfClients() > 1;
+        if (!awaited && now < held.deadline && documentLoader && documentLoader->isLoadingMainResource())
+            return false;
+        due.append(WTF::move(held.start));
+        return true;
+    });
+    for (auto& start : due)
+        start();
+    if (!heldScriptPreloads().isEmpty())
+        RunLoop::mainSingleton().dispatchAfter(heldScriptPreloadPoll, [] { startHeldScriptPreloads(); });
+}
+
 void WebLoaderStrategy::scheduleLoad(ResourceLoader& resourceLoader, CachedResource* resource, bool shouldClearReferrerOnHTTPSToHTTPRedirect)
 {
     auto identifier = *resourceLoader.identifier();
@@ -298,6 +368,20 @@ void WebLoaderStrategy::scheduleLoad(ResourceLoader& resourceLoader, CachedResou
             WEBLOADERSTRATEGY_RELEASE_LOG("scheduleLoad: intercepted URL will be scheduled with the NetworkProcess");
             scheduleLoadFromNetworkProcess(resourceLoader, request, *trackingParameters, shouldClearReferrerOnHTTPSToHTTPRedirect, maximumBufferingTime(resource));
         });
+        return;
+    }
+
+    if (shouldHoldScriptPreload(resourceLoader, resource)) {
+        bool polling = !heldScriptPreloads().isEmpty();
+        heldScriptPreloads().append(HeldScriptPreload { resourceLoader, *resource, MonotonicTime::now() + heldScriptPreloadLimit(),
+            [this, protectedThis = Ref { *this }, loader = Ref { resourceLoader }, weakResource = WeakPtr { *resource }, trackingParameters = *trackingParameters, shouldClearReferrerOnHTTPSToHTTPRedirect] {
+                if (loader->reachedTerminalState())
+                    return;
+                RefPtr resource = weakResource.get();
+                scheduleLoadFromNetworkProcess(loader, loader->request(), trackingParameters, shouldClearReferrerOnHTTPSToHTTPRedirect, maximumBufferingTime(resource.get()));
+            } });
+        if (!polling)
+            RunLoop::mainSingleton().dispatchAfter(heldScriptPreloadPoll, [] { startHeldScriptPreloads(); });
         return;
     }
 
