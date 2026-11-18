@@ -198,12 +198,23 @@ void MatchedDeclarationsCache::add(const Style::ComputedStyle& style, const Styl
 
     // Protect against unlimited growth.
 #if PLATFORM(WPE)
-    constexpr size_t maximumSize = 1024;
+    static const bool desktopCapacity = StringView::fromLatin1(std::getenv("WPE_DESKTOP_STYLE_CACHE")) != "0"_s;
+    const size_t maximumSize = desktopCapacity ? 2048 : 1024;
 #else
     constexpr size_t maximumSize = 16 * 1024;
 #endif
-    if (m_entries.size() > maximumSize)
+    if (m_entries.size() > maximumSize) {
+#if PLATFORM(WPE)
+        static const bool traceCapacity = !!std::getenv("WPE_STYLE_CACHE_TRACE");
+        static unsigned evictionCount = 0;
+        if (traceCapacity) {
+            ++evictionCount;
+            if (!(evictionCount & (evictionCount - 1)))
+                dataLogLn("WPE style cache evictions=", evictionCount, " capacity=", maximumSize);
+        }
+#endif
         m_entries.remove(m_entries.random());
+    }
 }
 
 void MatchedDeclarationsCache::remove(unsigned hash)
