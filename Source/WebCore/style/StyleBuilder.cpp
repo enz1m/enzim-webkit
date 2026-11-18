@@ -738,12 +738,39 @@ std::optional<Builder::CustomPropertyOrKeyword> Builder::resolveCustomPropertyVa
         return { { *keyword } };
 
     auto* registered = m_state->registeredProperty(name);
+#if PLATFORM(WPE)
+    static const bool reuseUniversalData = [] {
+        const char* value = getenv("WPE_UNIVERSAL_CUSTOM_PROPERTY_REUSE");
+        return !value || *value != '0';
+    }();
+#else
+    constexpr bool reuseUniversalData = false;
+#endif
+    bool canReuseData = !registered || (reuseUniversalData && registered->syntax.isUniversal());
+#if PLATFORM(WPE)
+    static const bool reuseRegisteredInitials = [] {
+        const char* value = getenv("WPE_REGISTERED_INITIAL_REUSE");
+        return !value || *value != '0';
+    }();
+#else
+    constexpr bool reuseRegisteredInitials = false;
+#endif
+    auto tryReuseInitial = [&](const CSSVariableData& data) -> std::optional<CustomPropertyOrKeyword> {
+        if (!reuseRegisteredInitials || !registered || !registered->initialValue
+            || registered->initialValueTokensForViewportUnits || registered->initialValue->isGuaranteedInvalid()
+            || data.isAttrTainted() != IsAttrTainted::No || data.tokens().size() > 64
+            || data.tokens() != registered->initialValue->tokens())
+            return { };
+        return { { Ref { *registered->initialValue } } };
+    };
     auto preResolved = switchOn(value.value(),
         [&](const Ref<CSSSubstitutionValue>&) -> std::optional<CustomPropertyOrKeyword> {
             return { };
         },
         [&](const Ref<CSSVariableData>& data) -> std::optional<CustomPropertyOrKeyword> {
-            if (!registered)
+            if (auto initial = tryReuseInitial(data.get()))
+                return initial;
+            if (canReuseData)
                 return { { CustomProperty::createForVariableData(name, data.copyRef()) } };
             return { };
         },
@@ -779,7 +806,9 @@ std::optional<Builder::CustomPropertyOrKeyword> Builder::resolveCustomPropertyVa
     if (auto keyword = CSSPropertyParserHelpers::consumeCSSWideKeyword(keywordTokens))
         return { { *keyword } };
 
-    if (!registered)
+    if (auto initial = tryReuseInitial(*resolvedData))
+        return initial;
+    if (canReuseData)
         return { { CustomProperty::createForVariableData(name, *resolvedData) } };
 
     return computeCustomPropertyValueForSyntax(name, registered->syntax, *resolvedData);
