@@ -110,6 +110,11 @@ inline void ComputedStyleBase::setDisallowsFastPathInheritance()
     m_nonInheritedFlags.disallowsFastPathInheritance = true;
 }
 
+inline void ComputedStyleBase::setHasCustomPropertyDependencies()
+{
+    m_nonInheritedFlags.hasCustomPropertyDependencies = true;
+}
+
 inline void ComputedStyleBase::setEffectiveInert(bool effectiveInert)
 {
     SET(m_inheritedRareData, effectiveInert, effectiveInert);

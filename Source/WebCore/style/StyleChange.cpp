@@ -28,10 +28,18 @@
 
 #include "RenderStyleConstants.h"
 #include "StyleComputedStyle+GettersInlines.h"
+#include <cstdlib>
 #include <wtf/text/AtomString.h>
+#include <wtf/text/StringView.h>
 
 namespace WebCore {
 namespace Style {
+
+bool experimentalCustomPropertyInheritanceEnabled()
+{
+    static const bool enabled = StringView::fromLatin1(std::getenv("WPE_EXPERIMENTAL_CUSTOM_PROPERTY_INHERITANCE")) == "1"_s;
+    return enabled;
+}
 
 OptionSet<Change> determineChanges(const Style::ComputedStyle& s1, const Style::ComputedStyle& s2)
 {
@@ -44,8 +52,12 @@ OptionSet<Change> determineChanges(const Style::ComputedStyle& s1, const Style::
     if (!s1.fastPathInheritedEqual(s2))
         result.add(Change::FastPathInherited);
 
-    if (!s1.descendantAffectingNonInheritedPropertiesEqual(s2))
+    auto descendantAffectingEqual = s1.descendantAffectingNonInheritedPropertiesEqual(s2);
+    if (!descendantAffectingEqual)
         result.add(Change::Inherited);
+
+    if (experimentalCustomPropertyInheritanceEnabled() && result.contains(Change::Inherited) && descendantAffectingEqual && s1.nonFastPathInheritedEqual(s2, true))
+        result.add(Change::CustomPropertyInherited);
 
     // We just detach if a renderer acquires or loses a column-span, since spanning elements
     // typically won't contain much content.
@@ -95,6 +107,7 @@ TextStream& operator<<(TextStream& ts, Change change)
     case Change::Inherited: ts << "Inherited"_s; break;
     case Change::Container: ts << "Container"_s; break;
     case Change::Renderer: ts << "Renderer"_s; break;
+    case Change::CustomPropertyInherited: ts << "CustomPropertyInherited"_s; break;
     }
     return ts;
 }

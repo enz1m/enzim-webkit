@@ -175,12 +175,12 @@ void MatchResultCache::update(CachedMatchResult& result, const Style::ComputedSt
     result.styleToUpdate.get() = ComputedStyle::clone(style);
 }
 
-void MatchResultCache::updateForFastPathInherit(const Element& element, const Style::ComputedStyle& parentStyle)
+void MatchResultCache::updateForFastPathInherit(const Element& element, const Style::ComputedStyle& parentStyle, bool inheritCustomProperties)
 {
     CheckedPtr entry = m_entries.get(element);
     if (!entry)
         return;
-    entry->unadjustedStyle.style->fastPathInheritFrom(parentStyle);
+    entry->unadjustedStyle.style->fastPathInheritFrom(parentStyle, inheritCustomProperties);
 }
 
 void MatchResultCache::set(const Element& element, const UnadjustedStyle& unadjustedStyle)

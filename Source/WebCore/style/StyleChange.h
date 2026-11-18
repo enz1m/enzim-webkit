@@ -41,12 +41,14 @@ enum class Change : uint8_t {
     Inherited = 1 << 1,
     FastPathInherited = 1 << 2,
     Container = 1 << 3,
-    Renderer = 1 << 4
+    Renderer = 1 << 4,
+    CustomPropertyInherited = 1 << 5
 };
 
 constexpr OptionSet<Change> inheritedChanges() { return { Change::Inherited, Change::FastPathInherited }; }
 
 WEBCORE_EXPORT OptionSet<Change> determineChanges(const Style::ComputedStyle&, const Style::ComputedStyle&);
+bool experimentalCustomPropertyInheritanceEnabled();
 
 WTF::TextStream& operator<<(WTF::TextStream&, Change);
 WTF::TextStream& operator<<(WTF::TextStream&, OptionSet<Change>);

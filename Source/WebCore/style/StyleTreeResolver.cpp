@@ -80,12 +80,23 @@
 #include "WebAnimationTypes.h"
 #include "WebAnimationUtilities.h"
 #include <ranges>
+#include <cstdlib>
+#include <wtf/DataLog.h>
 
 namespace WebCore {
 
 namespace Style {
 
 DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(TreeResolverScope);
+
+static OptionSet<Change> mergeChanges(OptionSet<Change> first, OptionSet<Change> second)
+{
+    auto result = first | second;
+    if ((first.contains(Change::Inherited) && !first.contains(Change::CustomPropertyInherited))
+        || (second.contains(Change::Inherited) && !second.contains(Change::CustomPropertyInherited)))
+        result.remove(Change::CustomPropertyInherited);
+    return result;
+}
 
 TreeResolver::TreeResolver(Document& document, std::unique_ptr<Update> update)
     : m_document(document)
@@ -96,6 +107,9 @@ TreeResolver::TreeResolver(Document& document, std::unique_ptr<Update> update)
 
 TreeResolver::~TreeResolver()
 {
+    static const bool trace = StringView::fromLatin1(std::getenv("WPE_CUSTOM_PROPERTY_INHERITANCE_TRACE")) == "1"_s;
+    if (trace && m_customPropertyInheritances)
+        dataLogLn("WPE_CUSTOM_PROPERTY_INHERITANCES count=", m_customPropertyInheritances);
     m_document->styleScope().updateAnchorPositioningStateAfterStyleResolution();
 }
 
@@ -189,8 +203,10 @@ ResolvedStyle TreeResolver::styleForStyleable(const Styleable& styleable, Resolu
     if (resolutionType == ResolutionType::FastPathInherit) {
         // If the only reason we are computing the style is that some parent inherited properties changed, we can just copy them.
         auto style = Style::ComputedStyle::clonePtr(*existingStyle);
-        style->fastPathInheritFrom(parent().style);
-        m_document->styleScope().matchResultCache().updateForFastPathInherit(element, parent().style);
+        auto inheritCustomProperties = parent().changes.contains(Change::CustomPropertyInherited);
+        m_customPropertyInheritances += inheritCustomProperties;
+        style->fastPathInheritFrom(parent().style, inheritCustomProperties);
+        m_document->styleScope().matchResultCache().updateForFastPathInherit(element, parent().style, inheritCustomProperties);
         return { WTF::move(style) };
     }
 
@@ -398,7 +414,7 @@ auto TreeResolver::resolveElement(Element& element, const Style::ComputedStyle* 
                 return { Change::Renderer };
             return { Change::NonInherited };
         }();
-        update.changes |= pseudoElementChanges;
+        update.changes = mergeChanges(update.changes, pseudoElementChanges);
         if (!pseudoElementUpdate)
             return pseudoElementChanges;
         if (pseudoElementUpdate->recompositeLayer)
@@ -1244,11 +1260,18 @@ auto TreeResolver::determineResolutionType(const Element& element, const Style::
         return existingStyle ? ResolutionType::RebuildUsingExisting : ResolutionType::Full;
     case DescendantsToResolve::Children: {
         auto canFastPathInherit = [&] {
-            if (parentChanges.contains(Change::Inherited))
+            auto inheritCustomProperties = parentChanges.contains(Change::CustomPropertyInherited);
+            if (parentChanges.contains(Change::Inherited) && !inheritCustomProperties)
                 return false;
-            if (!parentChanges.contains(Change::FastPathInherited))
+            if (!parentChanges.contains(Change::FastPathInherited) && !inheritCustomProperties)
                 return false;
             if (!existingStyle || existingStyle->disallowsFastPathInheritance())
+                return false;
+            if (inheritCustomProperties && (existingStyle->hasCustomPropertyDependencies()
+                || existingStyle->hasAnyPublicPseudoStyles() || element.isPseudoElement()
+                || existingStyle->isContainerDependent() || existingStyle->insideLink() != InsideLink::NotInside
+                || !existingStyle->animations().isInitial() || !existingStyle->transitions().isInitial()
+                || element.hasKeyframeEffects(std::nullopt) || element.hasCustomStyleResolveCallbacks()))
                 return false;
             // Some non-inherited property changed along with a fast-path property and we may need to inherit it too.
             if (parentChanges.contains(Change::NonInherited) && existingStyle->hasExplicitlyInheritedProperties())
@@ -1528,7 +1551,7 @@ void TreeResolver::resumeDescendantResolutionIfNeeded(Element& element, OptionSe
 
     const auto& state = it->value;
 
-    changes |= state.changes;
+    changes = mergeChanges(changes, state.changes);
     descendantsToResolve = std::max(descendantsToResolve, state.descendantsToResolve);
 
     m_deferredDescendantResolutionStates.remove(it);

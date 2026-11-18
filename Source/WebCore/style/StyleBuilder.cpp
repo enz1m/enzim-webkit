@@ -29,6 +29,7 @@
 
 #include "config.h"
 #include "StyleBuilder.h"
+#include "StyleChange.h"
 
 #include "CSSCustomPropertySyntax.h"
 #include "CSSCustomPropertyValue.h"
@@ -268,6 +269,8 @@ void Builder::applyCustomPropertyFromCallingContext(const AtomString& name)
 
 void Builder::applyCustomPropertyImpl(const AtomString& name, const PropertyCascade::Property& property)
 {
+    if (experimentalCustomPropertyInheritanceEnabled())
+        m_state->style().setHasCustomPropertyDependencies();
     if (!property.cssValue[SelectorChecker::MatchDefault])
         return;
 
@@ -629,6 +632,9 @@ Ref<CSSValue> Builder::resolveSubstitutionFunctions(CSSPropertyID propertyID, CS
 {
     if (!value.hasSubstitutionFunctions())
         return value;
+
+    if (experimentalCustomPropertyInheritanceEnabled())
+        m_state->style().setHasCustomPropertyDependencies();
 
     SubstitutionResolver substitutionResolver(*this);
 

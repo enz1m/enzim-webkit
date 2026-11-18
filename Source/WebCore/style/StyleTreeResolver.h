@@ -256,6 +256,7 @@ private:
     bool m_allAnchorNamesInvalid { false };
 
     std::unique_ptr<Update> m_update;
+    unsigned m_customPropertyInheritances { 0 };
 };
 
 // Integrate with the HTML5 event loop instead, see EventLoop.cpp and consumers.

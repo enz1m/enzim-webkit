@@ -502,6 +502,8 @@ public:
 
     inline bool disallowsFastPathInheritance() const;
     inline void setDisallowsFastPathInheritance();
+    inline bool hasCustomPropertyDependencies() const;
+    inline void setHasCustomPropertyDependencies();
 
     inline bool hasDisplayAffectedByAnimations() const;
     inline void setHasDisplayAffectedByAnimations();
@@ -804,6 +806,7 @@ public:
         PREFERRED_TYPE(bool) unsigned useTreeCountingFunctions : 1;
         PREFERRED_TYPE(bool) unsigned hasExplicitlyInheritedProperties : 1; // Explicitly inherits a non-inherited property.
         PREFERRED_TYPE(bool) unsigned disallowsFastPathInheritance : 1;
+        PREFERRED_TYPE(bool) unsigned hasCustomPropertyDependencies : 1;
 
         // Non-property related state bits. These do not get copied by copyNonInheritedFrom().
         PREFERRED_TYPE(bool) unsigned firstChildState : 1;

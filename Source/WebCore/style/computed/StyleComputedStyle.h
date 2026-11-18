@@ -60,7 +60,7 @@ public:
     void inheritIgnoringCustomPropertiesFrom(const ComputedStyle&);
     void LEGACY_NODELETE inheritUnicodeBidiFrom(const ComputedStyle&);
     inline void inheritColumnPropertiesFrom(const ComputedStyle&);
-    void fastPathInheritFrom(const ComputedStyle&);
+    void fastPathInheritFrom(const ComputedStyle&, bool inheritCustomProperties = false);
     void copyNonInheritedFrom(const ComputedStyle&);
     void copyContentFrom(const ComputedStyle&);
     void copyPseudoElementsFrom(const ComputedStyle&);
@@ -78,7 +78,7 @@ public:
     bool inheritedEqual(const ComputedStyle&) const;
     bool nonInheritedEqual(const ComputedStyle&) const;
     bool LEGACY_NODELETE fastPathInheritedEqual(const ComputedStyle&) const;
-    bool nonFastPathInheritedEqual(const ComputedStyle&) const;
+    bool nonFastPathInheritedEqual(const ComputedStyle&, bool ignoreCustomProperties = false) const;
     bool LEGACY_NODELETE descendantAffectingNonInheritedPropertiesEqual(const ComputedStyle&) const;
     bool borderAndBackgroundEqual(const ComputedStyle&) const;
     inline bool containerTypeAndNamesEqual(const ComputedStyle&) const;

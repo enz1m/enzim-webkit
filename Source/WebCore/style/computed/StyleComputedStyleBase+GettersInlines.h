@@ -149,6 +149,11 @@ inline bool ComputedStyleBase::disallowsFastPathInheritance() const
     return m_nonInheritedFlags.disallowsFastPathInheritance;
 }
 
+inline bool ComputedStyleBase::hasCustomPropertyDependencies() const
+{
+    return m_nonInheritedFlags.hasCustomPropertyDependencies;
+}
+
 inline bool ComputedStyleBase::effectiveInert() const
 {
     return m_inheritedRareData->effectiveInert;

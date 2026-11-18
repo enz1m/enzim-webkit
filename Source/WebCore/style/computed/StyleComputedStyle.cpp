@@ -188,11 +188,16 @@ void ComputedStyle::inheritUnicodeBidiFrom(const ComputedStyle& inheritParent)
     m_nonInheritedFlags.unicodeBidi = inheritParent.m_nonInheritedFlags.unicodeBidi;
 }
 
-void ComputedStyle::fastPathInheritFrom(const ComputedStyle& inheritParent)
+void ComputedStyle::fastPathInheritFrom(const ComputedStyle& inheritParent, bool inheritCustomProperties)
 {
     ASSERT(!disallowsFastPathInheritance());
 
-    // FIXME: Use this mechanism for other properties too, like variables.
+    if (inheritCustomProperties && m_inheritedRareData->customProperties.ptr() != inheritParent.m_inheritedRareData->customProperties.ptr()) {
+        if (m_inheritedRareData->equalsIgnoringCustomProperties(*inheritParent.m_inheritedRareData))
+            m_inheritedRareData = inheritParent.m_inheritedRareData;
+        else
+            m_inheritedRareData.access().customProperties = inheritParent.m_inheritedRareData->customProperties;
+    }
     m_inheritedFlags.visibility = inheritParent.m_inheritedFlags.visibility;
     m_inheritedFlags.hasExplicitlySetColor = inheritParent.m_inheritedFlags.hasExplicitlySetColor;
 
@@ -266,7 +271,7 @@ bool ComputedStyle::fastPathInheritedEqual(const ComputedStyle& other) const
     return m_inheritedData->fastPathInheritedEqual(*other.m_inheritedData);
 }
 
-bool ComputedStyle::nonFastPathInheritedEqual(const ComputedStyle& other) const
+bool ComputedStyle::nonFastPathInheritedEqual(const ComputedStyle& other, bool ignoreCustomProperties) const
 {
     auto withoutFastPathFlags = [](auto flags) {
         flags.visibility = { };
@@ -277,7 +282,7 @@ bool ComputedStyle::nonFastPathInheritedEqual(const ComputedStyle& other) const
         return false;
     if (m_inheritedData.ptr() != other.m_inheritedData.ptr() && !m_inheritedData->nonFastPathInheritedEqual(*other.m_inheritedData))
         return false;
-    if (m_inheritedRareData != other.m_inheritedRareData)
+    if (ignoreCustomProperties ? !m_inheritedRareData->equalsIgnoringCustomProperties(*other.m_inheritedRareData) : m_inheritedRareData != other.m_inheritedRareData)
         return false;
     if (m_svgData.ptr() != other.m_svgData.ptr() && !m_svgData->inheritedEqual(other.m_svgData))
         return false;
