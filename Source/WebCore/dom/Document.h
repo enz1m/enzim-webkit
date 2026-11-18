@@ -2083,6 +2083,7 @@ public:
     void setHasVisuallyNonEmptyCustomContent() { m_hasVisuallyNonEmptyCustomContent = true; }
     bool hasVisuallyNonEmptyCustomContent() const { return m_hasVisuallyNonEmptyCustomContent; }
     void enqueuePaintTimingEntryIfNeeded();
+    bool hasEnqueuedFirstContentfulPaint() const { return m_didEnqueueFirstContentfulPaint; }
 
     void enqueueEventTimingEntriesIfNeeded();
 

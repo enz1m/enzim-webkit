@@ -85,6 +85,10 @@ protected:
     HTMLTreeBuilder& treeBuilder() LIFETIME_BOUND { return m_treeBuilder; }
 
 private:
+#if PLATFORM(WPE)
+    friend class HTMLScriptRunner;
+    bool deferInitialParserScript(PendingScript&);
+#endif
     HTMLDocumentParser(DocumentFragment&, Element& contextElement, OptionSet<ParserContentPolicy>, CustomElementRegistry*);
     static Ref<HTMLDocumentParser> create(DocumentFragment&, Element& contextElement, OptionSet<ParserContentPolicy>, CustomElementRegistry* = nullptr);
 

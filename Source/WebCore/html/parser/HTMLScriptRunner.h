@@ -57,6 +57,9 @@ public:
     bool executeScriptsWaitingForParsing();
 
     bool LEGACY_NODELETE hasParserBlockingScript() const;
+#if PLATFORM(WPE)
+    bool isParserBlockingScript(const PendingScript& script) const { return m_parserBlockingScript.get() == &script; }
+#endif
     bool isExecutingScript() const { return !!m_scriptNestingLevel; }
 
 private:

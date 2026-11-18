@@ -27,6 +27,16 @@
 #include "config.h"
 #include "HTMLDocumentParser.h"
 
+#include "CachedResource.h"
+#include "CachedResourceLoader.h"
+#include "DocumentResourceLoader.h"
+#include "DocumentView.h"
+#include "LocalFrameView.h"
+#include <wtf/HashMap.h>
+#include <wtf/NeverDestroyed.h>
+#include <wtf/RefCounted.h>
+#include <wtf/SetForScope.h>
+#include <wtf/TZoneMallocInlines.h>
 #include "CustomElementReactionQueue.h"
 #include "CustomElementRegistry.h"
 #include "DocumentFragment.h"
@@ -103,8 +113,34 @@ inline Ref<HTMLDocumentParser> HTMLDocumentParser::create(DocumentFragment& frag
     return adoptRef(*new HTMLDocumentParser(fragment, contextElement, parserContentPolicy, registry));
 }
 
+#if PLATFORM(WPE)
+struct InitialParserScriptPause final : RefCounted<InitialParserScriptPause> {
+    WTF_MAKE_TZONE_ALLOCATED(InitialParserScriptPause);
+public:
+    EventLoopTimerHandle timer;
+};
+WTF_MAKE_TZONE_ALLOCATED_IMPL(InitialParserScriptPause);
+
+static auto& initialParserScriptPauses()
+{
+    static NeverDestroyed<HashMap<HTMLDocumentParser*, RefPtr<InitialParserScriptPause>>> pauses;
+    return pauses.get();
+}
+
+static thread_local bool currentPumpAllowsInitialScriptPause { true };
+
+static void cancelInitialParserScriptPause(HTMLDocumentParser& parser)
+{
+    if (auto pause = initialParserScriptPauses().take(&parser))
+        pause->timer = nullptr;
+}
+#endif
+
 HTMLDocumentParser::~HTMLDocumentParser()
 {
+#if PLATFORM(WPE)
+    cancelInitialParserScriptPause(*this);
+#endif
     ASSERT(!m_parserScheduler);
     ASSERT(!m_pumpSessionNestingLevel);
     ASSERT(!m_preloadScanner);
@@ -113,6 +149,9 @@ HTMLDocumentParser::~HTMLDocumentParser()
 
 void HTMLDocumentParser::detach()
 {
+#if PLATFORM(WPE)
+    cancelInitialParserScriptPause(*this);
+#endif
     ScriptableDocumentParser::detach();
 
     if (m_scriptRunner)
@@ -127,6 +166,9 @@ void HTMLDocumentParser::detach()
 
 void HTMLDocumentParser::stopParsing()
 {
+#if PLATFORM(WPE)
+    cancelInitialParserScriptPause(*this);
+#endif
     DocumentParser::stopParsing();
     if (RefPtr parserScheduler = std::exchange(m_parserScheduler, nullptr))
         parserScheduler->detach(); // Will clear any timers.
@@ -318,6 +360,9 @@ void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
     // This is an attempt to check that this object is both attached to the Document and protected by something.
     ASSERT(refCount() >= 2);
 
+#if PLATFORM(WPE)
+    SetForScope allowInitialScriptPause(currentPumpAllowsInitialScriptPause, mode == SynchronousMode::AllowYield);
+#endif
     PumpSession session(m_pumpSessionNestingLevel, protect(contextForParsingSession()));
 
     auto emitTracePoint = [this](TracePointCode code) {
@@ -670,6 +715,52 @@ static ALWAYS_INLINE bool canChangeModuleScriptsExecutionTiming()
     return true;
 #endif
 }
+
+#if PLATFORM(WPE)
+bool HTMLDocumentParser::deferInitialParserScript(PendingScript& pendingScript)
+{
+    if (auto pause = initialParserScriptPauses().get(this))
+        return !!pause->timer;
+    if (isParsingFragment() || (m_pumpSessionNestingLevel && !currentPumpAllowsInitialScriptPause))
+        return false;
+    RefPtr document = this->document();
+    if (!document || !document->supportsPaintTiming() || document->hasEnqueuedFirstContentfulPaint()
+        || !document->body() || !document->haveStylesheetsLoaded()
+        || !document->view() || !document->view()->isVisuallyNonEmpty()
+        || (!document->isLayoutPending() && !document->hasPendingStyleRecalc()))
+        return false;
+    auto source = pendingScript.element().element().attributeWithoutSynchronization(HTMLNames::srcAttr).string();
+    if (source.isEmpty())
+        return false;
+    auto* resource = document->cachedResourceLoader().cachedResource(document->encodingParseURL(source));
+    if (!resource || !resource->isLoaded() || resource->encodedSize() < 4 * 1024 * 1024)
+        return false;
+    Ref pause = adoptRef(*new InitialParserScriptPause);
+    initialParserScriptPauses().set(this, pause.ptr());
+    static const bool trace = StringView::fromLatin1(std::getenv("WPE_READY_SCRIPT_PAUSE_TRACE")) == "1"_s;
+    if (trace)
+        dataLogLn("WPE_READY_SCRIPT_PAUSE queued bytes=", resource->encodedSize(), " src=", source.left(220));
+    // Stop/detach cancel the task; the map entry remembers a completed pause until parser cleanup.
+    pause->timer = document->eventLoop().scheduleTask(32_ms, TaskSource::InternalAsyncTask,
+        [protectedThis = Ref { *this }, script = Ref { pendingScript }] {
+            auto pause = initialParserScriptPauses().get(protectedThis.ptr());
+            if (!pause)
+                return;
+            pause->timer = nullptr;
+            if (protectedThis->isStopped() || !protectedThis->m_scriptRunner
+                || !protectedThis->m_scriptRunner->isParserBlockingScript(script))
+                return;
+            protectedThis->m_scriptRunner->executeScriptsWaitingForLoad(script);
+            if (!protectedThis->isWaitingForScripts())
+                protectedThis->resumeParsingAfterScriptExecution();
+        });
+    if (!pause->timer) {
+        initialParserScriptPauses().remove(this);
+        return false;
+    }
+    return true;
+}
+#endif
 
 void HTMLDocumentParser::notifyFinished(PendingScript& pendingScript)
 {

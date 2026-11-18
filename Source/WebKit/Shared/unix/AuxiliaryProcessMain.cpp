@@ -28,7 +28,9 @@
 
 #include <JavaScriptCore/Options.h>
 #include <WebCore/ProcessIdentifier.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wtf/StdLibExtras.h>
@@ -53,6 +55,13 @@ namespace WebKit {
 
 AuxiliaryProcessMainCommon::AuxiliaryProcessMainCommon()
 {
+#if PLATFORM(WPE) && OS(LINUX)
+    if (const char* value = getenv("WPE_PREPARE_FD_TABLE"); value && !strcmp(value, "1")) {
+        // Growing a shared Linux descriptor table waits for an RCU grace period.
+        UnixFileDescriptor descriptor { fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 511), UnixFileDescriptor::Adopt };
+    }
+#endif
+
 #if ENABLE(BREAKPAD)
     installBreakpadExceptionHandler();
 #endif

@@ -35,6 +35,9 @@
 #include "FrameDestructionObserverInlines.h"
 #include "HTMLInputStream.h"
 #include "HTMLNames.h"
+#include "HTMLDocumentParser.h"
+#include <cstdlib>
+#include <wtf/text/StringView.h>
 #include "HTMLScriptRunnerHost.h"
 #include "IgnoreDestructiveWriteCountIncrementer.h"
 #include "InlineClassicScript.h"
@@ -166,6 +169,15 @@ void HTMLScriptRunner::executeParsingBlockingScripts()
         ASSERT(m_document);
         ASSERT(!isExecutingScript());
         ASSERT(m_document->haveStylesheetsLoaded());
+#if PLATFORM(WPE)
+        static const bool pauseInitialScript = StringView::fromLatin1(std::getenv("WPE_READY_SCRIPT_PAUSE")) == "1"_s;
+        if (pauseInitialScript) {
+            RefPtr document = m_document.get();
+            auto* parser = document && document->parser() ? document->parser()->asHTMLDocumentParser() : nullptr;
+            if (parser && parser->deferInitialParserScript(protect(*m_parserBlockingScript)))
+                return;
+        }
+#endif
         InsertionPointRecord insertionPointRecord(m_host.inputStream());
         executePendingScriptAndDispatchEvent(m_parserBlockingScript.releaseNonNull().get());
     }
