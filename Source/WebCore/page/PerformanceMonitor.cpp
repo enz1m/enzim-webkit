@@ -36,6 +36,10 @@
 #include "PerformanceLogging.h"
 #include "RegistrableDomain.h"
 #include "Settings.h"
+#if PLATFORM(WPE) && OS(LINUX)
+#include <cstdlib>
+#include <string_view>
+#endif
 #include <wtf/MemoryPressureHandler.h>
 #include <wtf/TZoneMallocInlines.h>
 
@@ -52,7 +56,18 @@ static constexpr const Seconds cpuUsageSamplingInterval { 10_min };
 
 static constexpr const Seconds memoryUsageMeasurementDelay { 10_s };
 
-static constexpr const Seconds delayBeforeProcessMayBecomeInactive { 8_min };
+static Seconds delayBeforeProcessMayBecomeInactive()
+{
+#if PLATFORM(WPE) && OS(LINUX)
+    static bool tight = [] {
+        const char* value = std::getenv("WEBKIT_TIGHT_BACKGROUND_HEAPS");
+        return value && std::string_view(value) == "1";
+    }();
+    if (tight)
+        return 15_s;
+#endif
+    return 8_min;
+}
 
 static constexpr const double postPageLoadCPUUsageDomainReportingThreshold { 20.0 }; // Reporting pages using over 20% CPU is roughly equivalent to reporting the 10% worst pages.
 #if !PLATFORM(IOS_FAMILY)
@@ -149,7 +164,7 @@ void PerformanceMonitor::activityStateChanged(OptionSet<ActivityState> oldState,
         m_processMayBecomeInactive = false;
         m_processMayBecomeInactiveTimer.stop();
     } else if (!m_processMayBecomeInactive && !m_processMayBecomeInactiveTimer.isActive())
-        m_processMayBecomeInactiveTimer.startOneShot(delayBeforeProcessMayBecomeInactive);
+        m_processMayBecomeInactiveTimer.startOneShot(delayBeforeProcessMayBecomeInactive());
 
     updateProcessStateForMemoryPressure();
 }

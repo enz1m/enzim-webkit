@@ -28,6 +28,11 @@
 #include "WebKitUserContentPrivate.h"
 #include "WebKitWebContextPrivate.h"
 #include "WebScriptMessageHandler.h"
+#if PLATFORM(WPE)
+#include "FrameInfoData.h"
+#include "WebFrameProxy.h"
+#include "WebPageProxy.h"
+#endif
 #include <jsc/JSCContextPrivate.h>
 #include <jsc/JSCValuePrivate.h>
 #include <wtf/CompletionHandler.h>
@@ -400,6 +405,58 @@ webkit_script_message_reply_return_error_message(WebKitScriptMessageReply* messa
     message->sendErrorMessage(errorMessage);
 }
 
+#if PLATFORM(WPE)
+// The frame and document that posted the script message being delivered, from
+// WebKit's own records; set only while the message signal is emitted.
+struct EnzuiMessageFrame {
+    uint64_t frameID { 0 };
+    UTF8CString documentID;
+    UTF8CString origin;
+    UTF8CString topOrigin;
+    bool mainFrame { false };
+};
+static const EnzuiMessageFrame* enzuiMessageFrame;
+
+static EnzuiMessageFrame enzuiMessageFrameFor(WebPageProxy& page, const FrameInfoData& frameInfo)
+{
+    EnzuiMessageFrame frame;
+    frame.frameID = frameInfo.frameID.toUInt64();
+    if (frameInfo.documentID)
+        frame.documentID = makeString(frameInfo.documentID->processIdentifier().toUInt64(), '-', frameInfo.documentID->object().toString()).utf8();
+    frame.origin = frameInfo.securityOrigin.toString().utf8();
+    if (RefPtr mainFrame = page.mainFrame()) {
+        frame.topOrigin = SecurityOriginData::fromURL(mainFrame->url()).toString().utf8();
+        frame.mainFrame = mainFrame->frameID() == frameInfo.frameID;
+    }
+    return frame;
+}
+
+class EnzuiMessageFrameScope {
+public:
+    explicit EnzuiMessageFrameScope(const EnzuiMessageFrame& frame)
+        : m_previous(std::exchange(enzuiMessageFrame, &frame))
+    {
+    }
+    ~EnzuiMessageFrameScope() { enzuiMessageFrame = m_previous; }
+
+private:
+    const EnzuiMessageFrame* m_previous;
+};
+
+// Strings are borrowed for the duration of a script-message-received handler.
+extern "C" WEBKIT_API gboolean webkit_user_content_manager_enzui_message_frame_v1(WebKitUserContentManager*, guint64* frameID, const char** documentID, const char** origin, const char** topOrigin, gboolean* mainFrame)
+{
+    if (!enzuiMessageFrame || enzuiMessageFrame->documentID.isNull())
+        return FALSE;
+    *frameID = enzuiMessageFrame->frameID;
+    *documentID = enzuiMessageFrame->documentID.legacyCStringPointer();
+    *origin = enzuiMessageFrame->origin.legacyCStringPointer();
+    *topOrigin = enzuiMessageFrame->topOrigin.legacyCStringPointer();
+    *mainFrame = enzuiMessageFrame->mainFrame;
+    return TRUE;
+}
+#endif
+
 class ScriptMessageClientGtk final : public WebScriptMessageHandler::Client {
     WTF_MAKE_TZONE_ALLOCATED_INLINE(ScriptMessageClientGtk);
 public:
@@ -410,12 +467,19 @@ public:
     {
     }
 
-    void didPostMessage(WebPageProxy&, FrameInfoData&&, API::ContentWorld&, JavaScriptEvaluationResult&& jsMessage, CompletionHandler<void(std::expected<JavaScriptEvaluationResult, String>&&)>&& completionHandler) override
+    void didPostMessage(WebPageProxy& page, FrameInfoData&& frameInfo, API::ContentWorld&, JavaScriptEvaluationResult&& jsMessage, CompletionHandler<void(std::expected<JavaScriptEvaluationResult, String>&&)>&& completionHandler) override
     {
         if (!m_manager) {
             g_critical("Script message %s received after the WebKitUserContentManager has been destroyed. You must unregister the message handler!", g_quark_to_string(m_handlerName));
             return completionHandler(makeUnexpected(String()));
         }
+#if PLATFORM(WPE)
+        auto frame = enzuiMessageFrameFor(page, frameInfo);
+        EnzuiMessageFrameScope frameScope(frame);
+#else
+        UNUSED_PARAM(page);
+        UNUSED_PARAM(frameInfo);
+#endif
 
         if (m_supportsAsyncReply) {
             WebKitScriptMessageReply* message = webKitScriptMessageReplyCreate(WTF::move(completionHandler));

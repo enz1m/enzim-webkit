@@ -4689,6 +4689,37 @@ void webkit_web_view_evaluate_javascript(WebKitWebView* webView, const char* scr
     webkitWebViewEvaluateJavascriptInternal(webView, script, length, worldName, sourceURI, RunJavascriptReturnType::JSCValue, cancellable, callback, userData);
 }
 
+#if PLATFORM(WPE)
+// Evaluates in one frame, and only while it shows the document a script
+// message reported; finish with webkit_web_view_evaluate_javascript_finish().
+extern "C" WEBKIT_API void webkit_web_view_enzui_evaluate_in_frame_v1(WebKitWebView* webView, guint64 frameID, const char* documentID, const char* script, gssize length, const char* worldName, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    g_return_if_fail(script && documentID && worldName);
+    GRefPtr task = adoptGRef(g_task_new(webView, cancellable, callback, userData));
+    if (!WebCore::FrameIdentifier::isValidIdentifier(frameID)) {
+        g_task_return_new_error(task.get(), WEBKIT_JAVASCRIPT_ERROR, WEBKIT_JAVASCRIPT_ERROR_SCRIPT_FAILED, "Invalid frame");
+        return;
+    }
+    auto string = IPC::TransferString::create(length < 0 ? String::fromUTF8(script) : String::fromUTF8(unsafeMakeSpan(script, length)));
+    if (!string) {
+        g_task_return_new_error(task.get(), WEBKIT_JAVASCRIPT_ERROR, WEBKIT_JAVASCRIPT_ERROR_SCRIPT_FAILED, "Out of memory");
+        return;
+    }
+    // The web process refuses the evaluation unless the frame still shows this document.
+    WebKit::RunJavaScriptParameters params {
+        WTF::move(*string),
+        JSC::SourceTaintedOrigin::Untainted,
+        URL { makeString("enzui-frame-document:"_s, String::fromUTF8(documentID)) },
+        RunAsAsyncFunction::No,
+        std::nullopt,
+        ForceUserGesture::No,
+        RemoveTransientActivation::Yes
+    };
+    webkitWebViewRunJavaScriptWithParams(webView, WTF::move(params), worldName, RunJavascriptReturnType::JSCValue, WTF::move(task), WebCore::FrameIdentifier { frameID });
+}
+#endif
+
 /**
  * webkit_web_view_evaluate_javascript_finish:
  * @web_view: a #WebKitWebView

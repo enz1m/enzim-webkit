@@ -351,9 +351,10 @@ private:
         if (!glContext || !glContext->makeContextCurrent())
             return;
 
-        // FIXME: Add shader cache.
         GrContextOptions options;
         options.fAllowMSAAOnNewIntel = shouldAllowMSAAOnNewIntel();
+        if (auto limit = parseInteger<unsigned>(String::fromLatin1(getenv("WEBKIT_SKIA_PROGRAM_CACHE_LIMIT"))); limit && *limit >= 16 && *limit <= 256)
+            options.fRuntimeProgramCacheSize = static_cast<int>(*limit);
         // Skia defaults this to true, which alters the texture2D() calls in all generated shaders,
         // applying a so-called negative LOD bias, forcing texture2D() sampling into a LOD-computing
         // lookup which is a slow-path in certain tiled GPUs (such as Vivante/etnaviv). Since we

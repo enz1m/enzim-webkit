@@ -34,13 +34,25 @@
 #include <wtf/MathExtras.h>
 #include <wtf/MemoryFootprint.h>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/ProcessActivitySnapshot.h>
 #include <wtf/RAMSize.h>
+#if OS(LINUX)
+#include <wtf/linux/CGroupMemoryLimit.h>
+#endif
 
 #if PLATFORM(COCOA)
 #include <wtf/darwin/DispatchExtras.h>
 #endif
 
 namespace WTF {
+
+// Collectors sample activity without constructing the owner-thread pressure handler.
+static std::atomic<bool> s_processInactiveForAllocationPolicy { false };
+
+bool isProcessInactiveForAllocationPolicy()
+{
+    return s_processInactiveForAllocationPolicy.load(std::memory_order_relaxed);
+}
 
 WTF_EXPORT_PRIVATE bool MemoryPressureHandler::ReliefLogger::s_loggingEnabled = false;
 
@@ -108,14 +120,24 @@ static ASCIILiteral toString(MemoryUsagePolicy policy)
 }
 #endif
 
+// Soft heap/cache budgets must not reduce process-termination thresholds.
+static size_t memoryLimitForProcessTermination()
+{
+#if OS(LINUX)
+    return Detail::linuxActualMemoryLimit();
+#else
+    return ramSize();
+#endif
+}
+
 static size_t thresholdForMemoryKillOfActiveProcess(unsigned tabCount)
 {
 #if CPU(ADDRESS64)
-    size_t baseThreshold = ramSize() > 16 * GB ? 15 * GB : 7 * GB;
+    size_t baseThreshold = memoryLimitForProcessTermination() > 16 * GB ? 15 * GB : 7 * GB;
     return baseThreshold + tabCount * GB;
 #else
     UNUSED_PARAM(tabCount);
-    return std::min(3 * GB, static_cast<size_t>(truncateDoubleToUint64(ramSize() * 0.9)));
+    return std::min(3 * GB, static_cast<size_t>(truncateDoubleToUint64(memoryLimitForProcessTermination() * 0.9)));
 #endif
 }
 
@@ -126,7 +148,7 @@ static size_t thresholdForMemoryKillOfInactiveProcess(unsigned tabCount)
 #else
     size_t baseThreshold = tabCount > 1 ? 3 * GB : 2 * GB;
 #endif
-    return std::min(baseThreshold, static_cast<size_t>(truncateDoubleToUint64(ramSize() * 0.9)));
+    return std::min(baseThreshold, static_cast<size_t>(truncateDoubleToUint64(memoryLimitForProcessTermination() * 0.9)));
 }
 
 void MemoryPressureHandler::setPageCount(unsigned pageCount)
@@ -258,6 +280,7 @@ void MemoryPressureHandler::measurementTimerFired()
 
 void MemoryPressureHandler::setProcessState(WebsamProcessState state)
 {
+    s_processInactiveForAllocationPolicy.store(state == WebsamProcessState::Inactive, std::memory_order_relaxed);
     if (m_processState == state)
         return;
     m_processState = state;

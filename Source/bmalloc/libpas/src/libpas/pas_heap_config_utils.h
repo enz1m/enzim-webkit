@@ -59,6 +59,8 @@ typedef struct {
     uint8_t small_segregated_min_align_shift;
     uint8_t small_segregated_sharing_shift;
     size_t small_segregated_page_size;
+    // Zero derives the size limit from the exclusive payload.
+    size_t small_segregated_max_object_size;
     double small_segregated_wasteage_handicap;
     pas_segregated_deallocation_logging_mode small_exclusive_segregated_logging_mode;
     bool small_exclusive_segregated_enable_empty_word_eligibility_optimization;
@@ -103,10 +105,12 @@ typedef struct {
                 ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_page_size, \
             .granule_size = \
                 ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_page_size, \
-            .max_object_size = PAS_MAX_OBJECT_SIZE(PAS_BASIC_SEGREGATED_PAYLOAD_SIZE_EXCLUSIVE( \
-                ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_min_align_shift, \
-                ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_page_size, \
-                ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_page_size)), \
+            .max_object_size = ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_max_object_size \
+                ? ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_max_object_size \
+                : PAS_MAX_OBJECT_SIZE(PAS_BASIC_SEGREGATED_PAYLOAD_SIZE_EXCLUSIVE( \
+                    ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_min_align_shift, \
+                    ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_page_size, \
+                    ((pas_basic_heap_config_arguments){__VA_ARGS__}).small_segregated_page_size)), \
             .page_header_for_boundary = name ## _small_segregated_page_header_for_boundary, \
             .boundary_for_page_header = name ## _small_segregated_boundary_for_page_header, \
             .page_header_for_boundary_remote = name ## _small_segregated_page_header_for_boundary_remote, \
@@ -303,6 +307,7 @@ typedef struct {
     .small_lookup_size_upper_bound = PAS_SMALL_LOOKUP_SIZE_UPPER_BOUND, \
     .fast_megapage_kind_func = name ## _heap_config_fast_megapage_kind, \
     .small_segregated_is_in_megapage = true, \
+    .small_segregated_uses_exclusive_fast_megapage_kind = true, \
     .small_bitfit_is_in_megapage = true, \
     .page_header_func = name ## _heap_config_page_header, \
 

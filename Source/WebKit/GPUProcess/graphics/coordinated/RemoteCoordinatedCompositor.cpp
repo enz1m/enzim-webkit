@@ -52,9 +52,20 @@
 #include <WebCore/SkiaCompositingLayer.h>
 #include <WebCore/SkiaRecordingResult.h>
 #include <wtf/FastMalloc.h>
-#if defined(__GLIBC__)
+#if ENABLE(MEMORY_SAMPLER) && defined(__GLIBC__)
 #include <malloc.h>
 #endif
+#if ENABLE(MEMORY_SAMPLER) && !USE(SYSTEM_MALLOC)
+#include <bmalloc/BPlatform.h>
+#if BUSE(LIBPAS)
+// libpas metadata headers perform checked arithmetic over allocator-owned pages.
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+#include <bmalloc/pas_all_heaps.h>
+#include <bmalloc/pas_heap_lock.h>
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+#endif
+#endif
+#include <string_view>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/NumberOfCores.h>
 #include <wtf/WorkerPool.h>
@@ -79,10 +90,52 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 #include <GLES2/gl2ext.h>
 #endif
 
+// Keep private Skia CPU-configuration headers in Skia's own compilation unit.
+int GrGLCachedProgramCount(GrDirectContext*);
+
 namespace WebKit {
 using namespace WebCore;
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(RemoteCoordinatedCompositor);
+
+#if ENABLE(MEMORY_SAMPLER)
+static void logCacheMemory(const char* event, uint64_t identifier, const SkiaPictureDeserializer& images, GrDirectContext* context)
+{
+    static bool enabled = [] {
+        const char* value = getenv("WEBKIT_SAMPLE_MEMORY");
+        return value && std::string_view(value) == "1";
+    }();
+    if (!enabled)
+        return;
+    static MonotonicTime lastFrameSample;
+    auto now = MonotonicTime::now();
+    if (std::string_view(event) == "frame") {
+        if (now - lastFrameSample < 1_s)
+            return;
+        lastFrameSample = now;
+    }
+#if defined(__GLIBC__)
+    auto libc = mallinfo2();
+    WTFLogAlways("WPE_GPU_ALLOCATOR event=%s libc_used_bytes=%zu libc_free_bytes=%zu libc_mapped_bytes=%zu",
+        event, libc.uordblks, libc.fordblks, libc.hblkhd);
+#endif
+#if !USE(SYSTEM_MALLOC) && BUSE(LIBPAS)
+    pas_heap_lock_lock();
+    auto allocator = pas_all_heaps_compute_total_non_utility_summary();
+    pas_heap_lock_unlock();
+    WTFLogAlways("WPE_GPU_ALLOCATOR event=%s bmalloc_allocated_bytes=%zu bmalloc_committed_bytes=%zu bmalloc_fragmentation_bytes=%zu",
+        event, allocator.allocated, allocator.committed, pas_heap_summary_fragmentation(allocator));
+#endif
+    int textureCount = 0;
+    size_t textureBytes = 0;
+    if (context)
+        context->getResourceCacheUsage(&textureCount, &textureBytes);
+    if (context)
+        WTFLogAlways("WPE_GPU_PROGRAM_CACHE event=%s entries=%d", event, GrGLCachedProgramCount(context));
+    WTFLogAlways("WPE_GPU_MEMORY event=%s compositor=%llu encoded_image_bytes=%zu typefaces=%u cpu_cache_bytes=%zu font_cache_bytes=%zu gpu_cache_bytes=%zu gpu_cache_count=%d",
+        event, static_cast<unsigned long long>(identifier), images.imageBytes(), images.typefaceCount(), SkGraphics::GetResourceCacheTotalBytesUsed(), SkGraphics::GetFontCacheUsed(), textureBytes, textureCount);
+}
+#endif
 
 WorkQueue& RemoteCoordinatedCompositor::workQueue()
 {
@@ -106,11 +159,37 @@ RemoteCoordinatedCompositor::RemoteCoordinatedCompositor(Ref<IPC::Connection>&& 
 
 RemoteCoordinatedCompositor::~RemoteCoordinatedCompositor() = default;
 
+// These are accessed only on the shared compositor queue.
+static MonotonicTime lastCompositorClose;
+static bool closeCleanupScheduled;
+
+void RemoteCoordinatedCompositor::releaseUnusedResourcesAfterClose()
+{
+    auto remaining = lastCompositorClose + 5_s - MonotonicTime::now();
+    if (remaining > 0_s) {
+        workQueue().dispatchAfter(remaining, releaseUnusedResourcesAfterClose);
+        return;
+    }
+    closeCleanupScheduled = false;
+    auto& display = PlatformDisplay::sharedDisplay();
+    auto* context = display.skiaGLContext();
+    if (!context || !context->makeContextCurrent())
+        return;
+
+    releaseUnusedRemoteTileImages(5_s);
+    display.skiaGrContext()->performDeferredCleanup(std::chrono::seconds(5));
+    SkGraphics::PurgeResourceCache();
+    WTF::releaseFastMallocFreeMemory();
+}
+
 void RemoteCoordinatedCompositor::stopListeningForIPC()
 {
     m_connection->removeWorkQueueMessageReceiver(Messages::RemoteCoordinatedCompositor::messageReceiverName(), m_identifier);
     workQueue().dispatch([protectedThis = Ref { *this }] {
         protectedThis->destroyTargets();
+        lastCompositorClose = MonotonicTime::now();
+        if (!std::exchange(closeCleanupScheduled, true))
+            workQueue().dispatchAfter(5_s, releaseUnusedResourcesAfterClose);
     });
 }
 
@@ -453,15 +532,11 @@ void RemoteCoordinatedCompositor::releaseMemory(CoordinatedCompositorFrame&& fra
     PlatformDisplay::sharedDisplay().skiaReleaseUnusedResources(critical ? WTF::Critical::Yes : WTF::Critical::No);
     auto& deserializer = m_pictureCache->deserializer();
     auto evicted = critical ? deserializer.evictImages(2_s, 32 * 1024 * 1024) : deserializer.evictImages(30_s, 192 * 1024 * 1024);
-    // Return what the release freed to the system, as web processes do. Skia
-    // and the GL driver allocate with the system malloc, whose per-thread
-    // arenas keep freed memory until trimmed.
-    if (critical) {
+    if (critical)
         WTF::releaseFastMallocFreeMemory();
-#if defined(__GLIBC__)
-        malloc_trim(0);
+#if ENABLE(MEMORY_SAMPLER)
+    logCacheMemory("release", m_identifier, deserializer, PlatformDisplay::sharedDisplay().skiaGrContext());
 #endif
-    }
     completionHandler(WTF::move(evicted));
 }
 
@@ -526,6 +601,9 @@ void RemoteCoordinatedCompositor::renderFrame(CoordinatedCompositorFrame&& frame
     }
     // Images no tile used for a while go; the web process sends them again
     // if a repaint needs them.
+#if ENABLE(MEMORY_SAMPLER)
+    logCacheMemory("frame", m_identifier, m_pictureCache->deserializer(), PlatformDisplay::sharedDisplay().skiaGrContext());
+#endif
     completionHandler(WTF::move(renderingFence), hasRunningAnimations, true, m_pictureCache->deserializer().evictImages(30_s, 192 * 1024 * 1024));
 }
 

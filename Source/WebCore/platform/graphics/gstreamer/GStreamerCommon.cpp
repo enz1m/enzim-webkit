@@ -90,6 +90,10 @@
 #include "WebKitThunderParser.h"
 #endif
 
+#if ENABLE(ENCRYPTED_MEDIA) && USE(GCRYPT)
+#include "WebKitClearKeyDecryptorGStreamer.h"
+#endif
+
 #if ENABLE(VIDEO)
 #include "ImageDecoderGStreamer.h"
 #include "VideoEncoderPrivateGStreamer.h"
@@ -551,6 +555,12 @@ void registerWebKitGStreamerElements()
             gst_element_register(nullptr, "webkitthunder", GST_RANK_PRIMARY + 100, WEBKIT_TYPE_MEDIA_THUNDER_DECRYPT);
             gst_element_register(nullptr, "webkitthunderparser", GST_RANK_PRIMARY + 101, WEBKIT_TYPE_MEDIA_THUNDER_PARSER);
         }
+#endif
+
+#if ENABLE(ENCRYPTED_MEDIA) && USE(GCRYPT)
+        // parsebin auto-plugs decryptors by their sink caps. This one ranks below the Thunder
+        // decryptor, which handles ClearKey itself when its OCDM supports it.
+        gst_element_register(nullptr, "webkitclearkey", GST_RANK_PRIMARY, WEBKIT_TYPE_MEDIA_CK_DECRYPT);
 #endif
 
 #if ENABLE(MEDIA_STREAM)

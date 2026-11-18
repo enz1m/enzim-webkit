@@ -5441,6 +5441,15 @@ void WebPage::runJavaScriptInFrameInScriptWorld(RunJavaScriptParameters&& parame
         completionHandler(JavaScriptEvaluationResult { root, WTF::move(values) });
         return;
     }
+    if (parameters.sourceURL.protocolIs("enzui-frame-document"_s)) {
+        RefPtr frame = webFrame ? webFrame->coreLocalFrame() : nullptr;
+        RefPtr document = frame ? frame->document() : nullptr;
+        auto expected = parameters.sourceURL.path().toString();
+        if (!document || expected != makeString(document->identifier().processIdentifier().toUInt64(), '-', document->identifier().object().toString())) {
+            completionHandler(makeUnexpected(ExceptionDetails { "ENZUI_FRAME_DOCUMENT_GONE"_s }));
+            return;
+        }
+    }
 #endif
 
     m_userContentController->addContentWorldIfNecessary(worldData);

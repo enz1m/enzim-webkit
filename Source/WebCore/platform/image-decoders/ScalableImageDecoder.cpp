@@ -26,6 +26,8 @@
 #include "NotImplemented.h"
 #include "ProcessCapabilities.h"
 #include "SharedBuffer.h"
+#include <cstdlib>
+#include <string_view>
 #include <wtf/TZoneMallocInlines.h>
 
 #if !PLATFORM(COCOA)
@@ -241,9 +243,12 @@ bool ScalableImageDecoder::shouldDeferDecoding(size_t index, SubsamplingLevel su
         return false;
     if (decodeIfNeededAndGetFrameCount() != 1)
         return false;
-    // A frame decoded already is used as it is; one decoded in part while
-    // the data arrived is dropped.
-    return m_frameBufferCache.isEmpty() || !m_frameBufferCache[0].isComplete();
+    // A composited layer can retain the completed bitmap after its decoder cache is cleared.
+    static bool deferCompleteFrames = [] {
+        const char* value = std::getenv("WEBKIT_DEFER_COMPLETE_IMAGE_FRAMES");
+        return value && std::string_view(value) == "1";
+    }();
+    return deferCompleteFrames || m_frameBufferCache.isEmpty() || !m_frameBufferCache[0].isComplete();
 }
 
 PlatformImagePtr ScalableImageDecoder::createFrameImageAtIndex(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options)

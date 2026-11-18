@@ -34,6 +34,9 @@
 #include "ImageFrameAnimator.h"
 #include "ImageObserver.h"
 #include "Logging.h"
+#include "ProcessCapabilities.h"
+#include <cstdlib>
+#include <string_view>
 
 namespace WebCore {
 
@@ -113,11 +116,23 @@ void BitmapImageSource::encodedDataStatusChanged(EncodedDataStatus status)
 EncodedDataStatus BitmapImageSource::dataChanged(FragmentedSharedBuffer* data, bool allDataReceived)
 {
     m_descriptor.clear();
+    bool completedStream = allDataReceived && !m_allDataReceived;
 
     auto status = setData(data, allDataReceived);
     if (status < EncodedDataStatus::TypeAvailable)
         return status;
 
+#if USE(SKIA)
+    static bool deferCompleteFrames = [] {
+        const char* value = std::getenv("WEBKIT_DEFER_COMPLETE_IMAGE_FRAMES");
+        return value && std::string_view(value) == "1";
+    }();
+    // A cached complete bitmap otherwise bypasses the decoder's deferred-image handoff.
+    if (deferCompleteFrames && completedStream && status == EncodedDataStatus::Complete && ProcessCapabilities::compositesInGPUProcess() && protect(m_decoder)->frameCount() == 1)
+        destroyNativeImageAtIndex(0);
+#else
+    UNUSED_PARAM(completedStream);
+#endif
     encodedDataStatusChanged(status);
     return status;
 }

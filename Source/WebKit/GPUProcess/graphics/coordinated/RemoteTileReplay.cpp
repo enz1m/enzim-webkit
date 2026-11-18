@@ -32,13 +32,19 @@
 #include <WebCore/IntRect.h>
 #include <WebCore/SkiaRecordingResult.h>
 #include <array>
+#include <wtf/Condition.h>
 #include <wtf/FastMalloc.h>
 #include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
 #include <wtf/Lock.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/Scope.h>
 
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+#include <skia/codec/SkJpegDecoder.h>
 #include <skia/core/SkBitmap.h>
+#include <skia/core/SkData.h>
 #include <skia/core/SkImage.h>
 #include <skia/core/SkPicture.h>
 #include <skia/utils/SkNWayCanvas.h>
@@ -47,8 +53,6 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 namespace WebKit {
 using namespace WebCore;
 
-// Halving an image three times, to an eighth of its size, is the most
-// Chromium's JPEG decoding reduces it.
 static constexpr unsigned maximumLevels = 3;
 static constexpr size_t scaledImageBudgetBytes = 48 * MB;
 
@@ -60,35 +64,44 @@ public:
         return cache.get();
     }
 
-    // The image reduced `levels` times by half; the full size is decoded for
-    // it and not kept.
     sk_sp<SkImage> image(const SkImage& image, unsigned levels)
     {
         uint64_t key = static_cast<uint64_t>(image.uniqueID()) << 8 | levels;
         {
             Locker locker { m_lock };
+            while (m_decoding.contains(key))
+                m_decodeFinished.wait(m_lock);
             if (auto it = m_entries.find(key); it != m_entries.end()) {
                 it->value.lastUse = ++m_clock;
+                it->value.lastAccess = MonotonicTime::now();
                 return it->value.image;
             }
+            m_decoding.add(key);
         }
+        auto finished = makeScopeExit([&] {
+            Locker locker { m_lock };
+            m_decoding.remove(key);
+            m_decodeFinished.notifyAll();
+        });
 
-        auto full = allocate(image.imageInfo());
-        if (!full || !image.readPixels(nullptr, full->pixmap(), 0, 0, SkImage::kDisallow_CachingHint))
-            return nullptr;
         unsigned factor = 1 << levels;
         auto scaledInfo = image.imageInfo().makeWH(std::max(1, (image.width() + static_cast<int>(factor) - 1) / static_cast<int>(factor)), std::max(1, (image.height() + static_cast<int>(factor) - 1) / static_cast<int>(factor)));
-        auto bitmap = allocate(scaledInfo);
-        if (!bitmap)
-            return nullptr;
-        boxFilter(full->pixmap(), bitmap->pixmap(), factor);
-        full = std::nullopt;
+        auto bitmap = decodeJPEG(image, scaledInfo, factor);
+        if (!bitmap) {
+            auto full = allocate(image.imageInfo());
+            if (!full || !image.readPixels(nullptr, full->pixmap(), 0, 0, SkImage::kDisallow_CachingHint))
+                return nullptr;
+            bitmap = allocate(scaledInfo);
+            if (!bitmap)
+                return nullptr;
+            boxFilter(full->pixmap(), bitmap->pixmap(), factor);
+        }
         bitmap->setImmutable();
         auto scaled = bitmap->asImage();
         size_t bytes = bitmap->computeByteSize();
 
         Locker locker { m_lock };
-        auto result = m_entries.add(key, Entry { scaled, ++m_clock, bytes });
+        auto result = m_entries.add(key, Entry { scaled, ++m_clock, MonotonicTime::now(), bytes });
         if (!result.isNewEntry)
             return result.iterator->value.image;
         m_bytes += bytes;
@@ -104,9 +117,37 @@ public:
         return scaled;
     }
 
+    void releaseUnusedImages(Seconds age)
+    {
+        Locker locker { m_lock };
+        auto oldestAllowed = MonotonicTime::now() - age;
+        size_t releasedBytes = 0;
+        m_entries.removeIf([&](auto& entry) {
+            if (entry.value.lastAccess > oldestAllowed)
+                return false;
+            releasedBytes += entry.value.bytes;
+            return true;
+        });
+        m_bytes -= releasedBytes;
+    }
+
 private:
-    // In WebKit's allocator, which returns freed memory to the system; the
-    // full size is tens of megabytes for a photo.
+    static std::optional<SkBitmap> decodeJPEG(const SkImage& image, const SkImageInfo& info, unsigned factor)
+    {
+        auto data = image.refEncodedData();
+        if (!data || !SkJpegDecoder::IsJpeg(data->data(), data->size()))
+            return std::nullopt;
+        SkCodec::Result result;
+        auto codec = SkJpegDecoder::Decode(WTF::move(data), &result);
+        if (!codec || codec->dimensions() != image.dimensions() || codec->getScaledDimensions(1.f / factor) != info.dimensions())
+            return std::nullopt;
+        // WebCore applies EXIF orientation at draw time; decode the unrotated pixels.
+        auto bitmap = allocate(info);
+        if (!bitmap || codec->getPixels(bitmap->pixmap()) != SkCodec::kSuccess)
+            return std::nullopt;
+        return bitmap;
+    }
+
     static std::optional<SkBitmap> allocate(const SkImageInfo& info)
     {
         size_t rowBytes = info.minRowBytes();
@@ -153,14 +194,22 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
     struct Entry {
         sk_sp<SkImage> image;
         uint64_t lastUse { 0 };
+        MonotonicTime lastAccess;
         size_t bytes { 0 };
     };
 
     Lock m_lock;
+    Condition m_decodeFinished;
+    HashSet<uint64_t> m_decoding WTF_GUARDED_BY_LOCK(m_lock);
     HashMap<uint64_t, Entry> m_entries WTF_GUARDED_BY_LOCK(m_lock);
     size_t m_bytes WTF_GUARDED_BY_LOCK(m_lock) { 0 };
     uint64_t m_clock WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 };
+
+void releaseUnusedRemoteTileImages(Seconds age)
+{
+    ScaledImageCache::singleton().releaseUnusedImages(age);
+}
 
 class ScaledImageReplayCanvas final : public SkNWayCanvas {
 public:

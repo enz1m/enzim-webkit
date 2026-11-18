@@ -227,6 +227,8 @@ public:
         return fProgramCache->precompileShader(this->getContext(), key, data);
     }
 
+    int cachedProgramCount() const { return fProgramCache ? fProgramCache->count() : 0; }
+
 #if defined(GPU_TEST_UTILS)
     bool isTestingOnlyBackendTexture(const GrBackendTexture&) const override;
 
@@ -480,6 +482,7 @@ private:
 
         void abandon();
         void reset();
+        int count() const { return fMap.count(); }
         sk_sp<GrGLProgram> findOrCreateProgram(GrDirectContext*,
                                                const GrProgramInfo&);
         sk_sp<GrGLProgram> findOrCreateProgram(GrDirectContext*,

@@ -54,6 +54,10 @@
 #include <WebCore/Settings.h>
 #include <wtf/SetForScope.h>
 
+#if ENABLE(SCROLLING_THREAD) || ENABLE(THREADED_ANIMATIONS)
+#include <WebCore/ScrollingThread.h>
+#endif
+
 #if USE(WPE_RENDERER)
 #include <WebCore/PlatformDisplayLibWPE.h>
 #include <wpe/wpe.h>
@@ -111,7 +115,7 @@ void WebProcess::stopRunLoop()
     // Closing the last page terminates the process, which calls back here.
     if (m_isStoppingRunLoop)
         return;
-    SetForScope isStoppingRunLoop(m_isStoppingRunLoop, true);
+    m_isStoppingRunLoop = true;
 
     // Pages are normally closed after Close message is received from the UI
     // process, but it can happen that the connection is closed before the
@@ -122,13 +126,21 @@ void WebProcess::stopRunLoop()
     for (auto& webPage : copyToVector(m_pageMap.values()))
         webPage->close([] { });
 
-    PlatformDisplay::destroySharedDisplay();
+    auto finishStopping = [this] {
+        PlatformDisplay::destroySharedDisplay();
 
 #if USE(ATSPI)
-    AccessibilityAtspi::singleton().disconnect();
+        AccessibilityAtspi::singleton().disconnect();
 #endif
 
-    AuxiliaryProcess::stopRunLoop();
+        AuxiliaryProcess::stopRunLoop();
+    };
+#if ENABLE(SCROLLING_THREAD) || ENABLE(THREADED_ANIMATIONS)
+    // Queued scrolling-tree destruction can still release video-driver resources.
+    ScrollingThread::dispatchBarrier(WTF::move(finishStopping));
+#else
+    finishStopping();
+#endif
 }
 
 void WebProcess::platformSetCacheModel(CacheModel cacheModel)

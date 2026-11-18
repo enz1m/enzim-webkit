@@ -149,6 +149,7 @@ struct pas_heap_config {
     pas_heap_config_fast_megapage_kind_func fast_megapage_kind_func;
 
     bool small_segregated_is_in_megapage;
+    bool small_segregated_uses_exclusive_fast_megapage_kind;
     bool small_bitfit_is_in_megapage;
 
     /* This abstracts the page header table lookup. It doesn't have to actually use a page header

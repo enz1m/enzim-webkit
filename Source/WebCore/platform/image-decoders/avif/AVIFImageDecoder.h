@@ -32,7 +32,6 @@ namespace WebCore {
 
 class AVIFImageReader;
 
-// This class decodes the AVIF image format.
 class AVIFImageDecoder final : public ScalableImageDecoder {
 public:
     static Ref<ScalableImageDecoder> create(AlphaOption alphaOption, GammaAndColorProfileOption gammaAndColorProfileOption)
@@ -44,6 +43,7 @@ public:
 
     // ScalableImageDecoder
     String filenameExtension() const final { return "avif"_s; }
+    bool supportsDeferredDecoding() const final { return true; }
     size_t decodeIfNeededAndGetFrameCount() const final { return m_frameCount; };
     RepetitionCount repetitionCount() const final;
     ScalableImageDecoderFrame* frameBufferAtIndex(size_t index) final WTF_REQUIRES_LOCK(m_lock);

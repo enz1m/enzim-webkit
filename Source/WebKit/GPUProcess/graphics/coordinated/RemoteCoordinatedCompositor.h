@@ -91,6 +91,7 @@ private:
     RemoteCoordinatedCompositor(Ref<IPC::Connection>&&, uint64_t identifier, Ref<CoordinatedCompositorPictureCache>&&);
 
     static WorkQueue& workQueue();
+    static void releaseUnusedResourcesAfterClose();
 
     void registerBuffer(uint64_t bufferID, WebCore::DMABufBufferAttributes&&);
     void unregisterBuffer(uint64_t bufferID);

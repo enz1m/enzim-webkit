@@ -199,7 +199,11 @@ void pas_designated_intrinsic_heap_initialize(pas_segregated_heap* heap,
         set_up_range(&data, 15, 16, 256);
         set_up_range(&data, 17, 19, 304);
         set_up_range(&data, 20, 22, 352);
-        set_up_range(&data, 23, 26, 416);
+        // The 4 KiB payload rounds this range to the 432-byte size class.
+        if (config.small_segregated_config.base.page_size == 4096)
+            set_up_range(&data, 23, 27, 432);
+        else
+            set_up_range(&data, 23, 26, 416);
         break;
 
     case 32:

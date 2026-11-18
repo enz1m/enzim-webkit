@@ -45,13 +45,16 @@
 #include "InlineStyleSheetOwner.h"
 #include "InspectorInstrumentation.h"
 #include "LayoutIntegrationLineLayout.h"
+#include "LegacyRenderSVGResourceContainer.h"
 #include "LocalFrame.h"
+#include "LocalFrameView.h"
 #include "Logging.h"
 #include "MemoryCache.h"
 #include "Page.h"
 #include "PerformanceLogging.h"
 #include "PlatformRenderTheme.h"
 #include "PluginDocument.h"
+#include "RenderDescendantIterator.h"
 #include "RenderObjectInlines.h"
 #include "RenderTheme.h"
 #include "RenderView.h"
@@ -67,6 +70,8 @@
 #include "WorkerGlobalScope.h"
 #include "WorkerThread.h"
 #include <JavaScriptCore/VM.h>
+#include <cstdlib>
+#include <string_view>
 #include <wtf/ResourceUsage.h>
 #include <wtf/SystemTracing.h>
 #include <wtf/text/MakeString.h>
@@ -122,6 +127,15 @@ static void releaseNoncriticalMemory(MaintainMemoryCache maintainMemoryCache)
 #endif
 }
 
+static bool shouldReleaseSVGResourceCaches()
+{
+    static bool enabled = [] {
+        const char* value = std::getenv("WEBKIT_RELEASE_SVG_RESOURCE_CACHES");
+        return value && std::string_view(value) == "1";
+    }();
+    return enabled && !LocalFrameView::currentPaintTimeStamp();
+}
+
 static void releaseCriticalMemory(Synchronous synchronous, MaintainBackForwardCache maintainBackForwardCache, MaintainMemoryCache maintainMemoryCache)
 {
     // Right now, the only reason we call release critical memory while not under memory pressure is if the process is about to be suspended.
@@ -153,6 +167,14 @@ static void releaseCriticalMemory(Synchronous synchronous, MaintainBackForwardCa
             return document.get();
         });
         for (auto& document : protectedDocuments) {
+            // Resource caches own raster surfaces even when an SVG image's document is not painted.
+            if (shouldReleaseSVGResourceCaches()) {
+                if (CheckedPtr renderView = document->renderView()) {
+                    for (CheckedRef resource : descendantsOfType<LegacyRenderSVGResourceContainer>(*renderView)) {
+                        resource->removeAllClientsFromCache();
+                    }
+                }
+            }
             document->clearQuerySelectorResults();
             document->styleScope().releaseMemory();
             if (RefPtr fontSelector = document->fontSelectorIfExists())

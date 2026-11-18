@@ -171,7 +171,8 @@ void WebMemorySampler::appendCurrentMemoryUsageToFile()
         statString.append(separator);
         for (size_t i = 0; i < borrowedValues->size(); ++i) {
             statString.append('\n', separator, borrowedKeys[i]);
-            appendSpaces(statString, 35 - borrowedKeys[i].length());
+            auto keyLength = borrowedKeys[i].length();
+            appendSpaces(statString, keyLength < 35 ? 35 - keyLength : 1);
             statString.append(borrowedValues[i]);
         }
     }

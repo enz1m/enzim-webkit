@@ -4625,3 +4625,13 @@ void GrGLGpu::onDumpJSON(SkJSONWriter* writer) const {
     writer->endObject();
 }
 #endif
+
+int GrGLCachedProgramCount(GrDirectContext* context);
+
+int GrGLCachedProgramCount(GrDirectContext* context) {
+    if (!context || context->backend() != GrBackendApi::kOpenGL) {
+        return 0;
+    }
+    auto* gpu = context->priv().getGpu();
+    return gpu ? static_cast<GrGLGpu*>(gpu)->cachedProgramCount() : 0;
+}

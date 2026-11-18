@@ -41,6 +41,16 @@ PAS_BEGIN_EXTERN_C;
 
 #define BMALLOC_SMALL_SHARING_SHIFT 4
 
+#if PAS_OS(LINUX) && PAS_X86_64
+#define BMALLOC_SMALL_SEGREGATED_PAGE_SIZE PAS_GRANULE_DEFAULT_SIZE
+// Retain the object-size cutoff when reducing Linux backing-page size.
+#define BMALLOC_SMALL_SEGREGATED_MAX_OBJECT_SIZE PAS_MAX_OBJECT_SIZE(PAS_BASIC_SEGREGATED_PAYLOAD_SIZE_EXCLUSIVE( \
+    BMALLOC_MINALIGN_SHIFT, PAS_SMALL_PAGE_DEFAULT_SIZE, PAS_SMALL_PAGE_DEFAULT_SIZE))
+#else
+#define BMALLOC_SMALL_SEGREGATED_PAGE_SIZE PAS_SMALL_PAGE_DEFAULT_SIZE
+#define BMALLOC_SMALL_SEGREGATED_MAX_OBJECT_SIZE 0
+#endif
+
 PAS_API void bmalloc_heap_config_activate(void);
 
 #define BMALLOC_HEAP_CONFIG PAS_BASIC_HEAP_CONFIG( \
@@ -52,7 +62,8 @@ PAS_API void bmalloc_heap_config_activate(void);
     .check_deallocation = false, \
     .small_segregated_min_align_shift = BMALLOC_MINALIGN_SHIFT, \
     .small_segregated_sharing_shift = BMALLOC_SMALL_SHARING_SHIFT, \
-    .small_segregated_page_size = PAS_SMALL_PAGE_DEFAULT_SIZE, \
+    .small_segregated_page_size = BMALLOC_SMALL_SEGREGATED_PAGE_SIZE, \
+    .small_segregated_max_object_size = BMALLOC_SMALL_SEGREGATED_MAX_OBJECT_SIZE, \
     .small_segregated_wasteage_handicap = PAS_SMALL_PAGE_HANDICAP, \
     .small_exclusive_segregated_logging_mode = pas_segregated_deallocation_size_oblivious_logging_mode, \
     .small_exclusive_segregated_enable_empty_word_eligibility_optimization = true, \

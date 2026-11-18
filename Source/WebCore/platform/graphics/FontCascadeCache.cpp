@@ -41,6 +41,7 @@
 #include "FontCache.h"
 #include "FontCascadeCacheInvalidation.h"
 #include "FontCascadeDescription.h"
+#include "FontCascadeInlines.h"
 #include "ScriptExecutionContext.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "TextShapingResultAndDisplayList.h"

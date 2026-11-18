@@ -21,6 +21,11 @@
 
 #include "config.h"
 #include "Heap.h"
+#if PLATFORM(WPE) && OS(LINUX)
+#include <cstdlib>
+#include <string_view>
+#include <wtf/ProcessActivitySnapshot.h>
+#endif
 
 #include "JSCJSValueInlines.h"
 
@@ -169,7 +174,7 @@ static size_t LEGACY_NODELETE maxEdenSizeForRateLimiting(GrowthMode growthMode, 
     return 0.0;
 }
 
-static size_t proportionalHeapSize(size_t heapSize, GrowthMode growthMode, size_t ramSize)
+static size_t foregroundProportionalHeapSize(size_t heapSize, GrowthMode growthMode, size_t ramSize)
 {
     if (VM::isInMiniMode())
         return Options::miniVMHeapGrowthFactor() * heapSize;
@@ -202,6 +207,28 @@ static size_t proportionalHeapSize(size_t heapSize, GrowthMode growthMode, size_
         return Options::mediumHeapGrowthFactor() * heapSize;
 #endif
     return Options::largeHeapGrowthFactor() * heapSize;
+}
+
+static size_t targetHeapSize(size_t heapSize, GrowthMode growthMode, size_t ramSize, size_t minimum)
+{
+    size_t target = std::max(minimum, foregroundProportionalHeapSize(heapSize, growthMode, ramSize));
+#if PLATFORM(WPE) && OS(LINUX)
+    auto enabled = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && std::string_view(value) == "1";
+    };
+    static bool tight = enabled("WEBKIT_TIGHT_BACKGROUND_HEAPS");
+    static bool trace = enabled("WEBKIT_TRACE_BACKGROUND_HEAP_POLICY");
+    if (!tight && !trace)
+        return target;
+    bool inactive = WTF::isProcessInactiveForAllocationPolicy();
+    size_t foregroundTarget = target;
+    if (tight && inactive)
+        target = std::min(target, std::max(std::min(minimum, 8 * MB), static_cast<size_t>(heapSize * 1.25)));
+    if (trace)
+        dataLogLn("WPE_BACKGROUND_HEAP size=", heapSize, " foreground=", foregroundTarget, " target=", target, " inactive=", inactive, " tight=", tight);
+#endif
+    return target;
 }
 
 static void recordType(TypeCountSet& set, JSCell* cell)
@@ -1927,7 +1954,7 @@ void Heap::updateAllocationLimits()
         // the new allocation limit based on the current size of the heap, with a
         // fixed minimum.
         size_t lastMaxHeapSize = m_maxHeapSize;
-        m_maxHeapSize = std::max(m_minBytesPerCycle, proportionalHeapSize(currentHeapSize, m_growthMode, m_ramSize));
+        m_maxHeapSize = targetHeapSize(currentHeapSize, m_growthMode, m_ramSize, m_minBytesPerCycle);
         m_maxEdenSize = m_maxHeapSize - currentHeapSize;
         if (m_isInOpportunisticTask && !isCritical) {
             // After an Opportunistic Full GC, we allow eden to occupy all the space we recovered.

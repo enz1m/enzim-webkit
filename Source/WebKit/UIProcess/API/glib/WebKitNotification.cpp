@@ -55,6 +55,7 @@ struct _WebKitNotificationPrivate {
     UTF8CString title;
     UTF8CString body;
     UTF8CString tag;
+    UTF8CString origin;
     guint64 id;
 };
 
@@ -190,6 +191,16 @@ WebKitNotification* webkitNotificationCreate(WebKit::WebNotification& webNotific
     WebKitNotification* notification = WEBKIT_NOTIFICATION(g_object_new(WEBKIT_TYPE_NOTIFICATION, nullptr));
     notification->priv->notification = &webNotification;
     return notification;
+}
+
+// The origin of the document that showed the notification, from WebKit's own
+// record rather than the page; notification permission is granted per origin.
+extern "C" WEBKIT_API const char* webkit_notification_enzui_get_origin_v1(WebKitNotification* notification)
+{
+    g_return_val_if_fail(WEBKIT_IS_NOTIFICATION(notification), nullptr);
+    if (notification->priv->origin.isNull())
+        notification->priv->origin = notification->priv->notification->origin().securityOrigin().toString().utf8();
+    return notification->priv->origin.legacyCStringPointer();
 }
 
 const WebKit::WebNotification& webkitNotificationGetWebNotification(WebKitNotification* notification)

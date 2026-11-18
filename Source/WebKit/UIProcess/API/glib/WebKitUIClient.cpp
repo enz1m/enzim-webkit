@@ -379,6 +379,13 @@ private:
         webkitWebViewMakePermissionRequest(m_webView, WEBKIT_PERMISSION_REQUEST(websiteDataAccessPermissionRequest.get()));
     }
 
+#if PLATFORM(WPE)
+    bool takeFocus(WebPageProxy*, WKFocusDirection direction) final
+    {
+        return webkitWebViewEnzuiTakeFocus(m_webView, direction == kWKFocusDirectionBackward);
+    }
+#endif
+
 #if PLATFORM(GTK)
     bool takeFocus(WebPageProxy* page, WKFocusDirection direction) final
     {

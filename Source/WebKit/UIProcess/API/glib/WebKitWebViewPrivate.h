@@ -149,3 +149,8 @@ void webkitWebViewLoadServiceWorker(WebKitWebView*, const URL&, bool usingModule
 #if ENABLE(WK_WEB_EXTENSIONS)
 WebKitWebExtensionContext *webkitWebViewGetWebExtensionContext(WebKitWebView*);
 #endif
+
+#if PLATFORM(WPE)
+// Focus left the page at the end of its tab order; whether the host took it.
+bool webkitWebViewEnzuiTakeFocus(WebKitWebView*, bool backward);
+#endif

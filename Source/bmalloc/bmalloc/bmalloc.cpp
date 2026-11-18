@@ -30,6 +30,10 @@
 #include "SystemHeap.h"
 #include "VMAllocate.h"
 
+#if BOS(LINUX) && defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #if BENABLE(LIBPAS)
 #include "bmalloc_heap_config.h"
 #include "tagged_bmalloc_heap_utils.h"
@@ -170,6 +174,10 @@ void scavenge()
     scavengeThisThread();
 #elif BUSE(MIMALLOC)
     mi_collect(/* force */ true);
+#endif
+#if BOS(LINUX) && defined(__GLIBC__)
+    // Dependency allocations use glibc; libpas scavenging has released its locks.
+    ::malloc_trim(0);
 #endif
     if (SystemHeap* systemHeap = SystemHeap::tryGetIfShouldSupplantBmalloc()) {
         systemHeap->scavenge();

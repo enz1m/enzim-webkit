@@ -323,6 +323,8 @@ void LayerTreeHost::suspend()
 void LayerTreeHost::resume()
 {
     m_compositor->resume();
+    // Embedders may drop every presented buffer while the page is hidden.
+    m_forceFrameSync = true;
     FrameRenderer::resume();
 }
 

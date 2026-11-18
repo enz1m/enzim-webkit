@@ -86,7 +86,7 @@ pas_designated_intrinsic_heap_num_designated_indices_for_small_config(
     case 8:
         return 38;
     case 16:
-        return 26;
+        return small_config.base.page_size == 4096 ? 27 : 26;
     case 32:
         return 14;
     default:

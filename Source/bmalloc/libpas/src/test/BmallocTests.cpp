@@ -28,6 +28,8 @@
 #include "bmalloc_heap_config.h"
 #include "bmalloc_heap_innards.h"
 #include "pas_internal_config.h"
+#include "pas_all_heaps.h"
+#include "pas_heap_lock.h"
 #include "bmalloc_heap_utils.h"
 #include "pas_large_heap.h"
 #include "tagged_bmalloc_heap.h"
@@ -42,6 +44,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 using namespace std;
 
@@ -462,6 +465,37 @@ void testBmallocMallocSizeAcrossHeaps(BmallocHeapVariant variant)
     }
 }
 
+void testBmallocSmallHeapSummary(BmallocHeapVariant variant)
+{
+    auto summary = [] {
+        pas_heap_lock_lock();
+        auto result = pas_all_heaps_compute_total_non_utility_segregated_summary();
+        pas_heap_lock_unlock();
+        return result;
+    };
+    constexpr size_t count = 65536;
+    constexpr size_t size = 64;
+    vector<void*> allocations;
+    allocations.reserve(count);
+    auto before = summary();
+    for (size_t i = 0; i < count; ++i) {
+        void* allocation = variant == BmallocHeapVariant::Tagged
+            ? tagged_bmalloc_try_allocate(size) : bmalloc_try_allocate(size);
+        CHECK(allocation);
+        memset(allocation, 7, size);
+        allocations.push_back(allocation);
+    }
+    auto after = summary();
+    CHECK_GREATER_EQUAL(after.allocated, before.allocated + count * size);
+    CHECK_GREATER_EQUAL(after.committed, after.allocated);
+    for (void* allocation : allocations) {
+        if (variant == BmallocHeapVariant::Tagged)
+            tagged_bmalloc_deallocate(allocation);
+        else
+            bmalloc_deallocate(allocation);
+    }
+}
+
 } // anonymous namespace
 
 void addBmallocTests()
@@ -476,6 +510,7 @@ void addBmallocTests()
         ADD_TEST(testBmallocSmallIndexOverlap(variant));
         ADD_TEST(testBmallocOwnsObject(variant));
         ADD_TEST(testBmallocMallocSizeAcrossHeaps(variant));
+        ADD_TEST(testBmallocSmallHeapSummary(variant));
 #if PAS_OS(DARWIN) && PAS_ENABLE_TESTING
         ADD_TEST(testBmallocLargeObjectDelegation(variant));
 #endif

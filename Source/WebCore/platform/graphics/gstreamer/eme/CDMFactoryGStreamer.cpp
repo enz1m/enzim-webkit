@@ -33,17 +33,29 @@
 
 #include "CDMProxy.h"
 
+#if USE(GCRYPT)
+#include "CDMClearKey.h"
+#include "CDMProxyClearKey.h"
+#endif
+
 #if ENABLE(THUNDER)
 #include "CDMThunder.h"
 #endif
 
 namespace WebCore {
 
+// Both lists keep the same order so that a key system resolves to the CDM and the proxy of
+// one backend: Thunder first, when its OCDM serves the key system, then the in-process
+// ClearKey CDM.
 void CDMFactory::platformRegisterFactories(Vector<WeakRef<CDMFactory>>& factories)
 {
 #if ENABLE(THUNDER)
     factories.append(CDMFactoryThunder::singleton());
-#else
+#endif
+#if USE(GCRYPT)
+    factories.append(CDMFactoryClearKey::singleton());
+#endif
+#if !ENABLE(THUNDER) && !USE(GCRYPT)
     UNUSED_PARAM(factories);
 #endif
 }
@@ -52,8 +64,10 @@ Vector<CDMProxyFactory*> CDMProxyFactory::platformRegisterFactories()
 {
     Vector<CDMProxyFactory*> factories;
 #if ENABLE(THUNDER)
-    factories.reserveInitialCapacity(1);
     factories.append(&CDMFactoryThunder::singleton());
+#endif
+#if USE(GCRYPT)
+    factories.append(&CDMProxyFactoryClearKey::singleton());
 #endif
     return factories;
 }

@@ -166,7 +166,9 @@ void SkiaCompositingLayer::updateBackingStore(CoordinatedBackingStoreProxy::Upda
     if (m_maskImage && !update.isEmpty())
         m_maskImage = nullptr;
 
-    ASSERT(m_backingStore);
+    // Queued tile updates may outlive the layer's backing store.
+    if (!m_backingStore)
+        return;
     m_backingStore->update(m_rect.size(), scale, WTF::move(update));
 }
 

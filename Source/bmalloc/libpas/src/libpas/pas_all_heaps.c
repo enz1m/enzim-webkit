@@ -389,7 +389,7 @@ static bool compute_total_non_utility_segregated_summary_directory_callback(
     size_t index;
     const pas_segregated_page_config* page_config;
 
-    if (!pas_segregated_page_config_kind_is_utility(directory->page_config_kind))
+    if (pas_segregated_page_config_kind_is_utility(directory->page_config_kind))
         return true;
     
     page_config = pas_segregated_page_config_kind_get_config(directory->page_config_kind);

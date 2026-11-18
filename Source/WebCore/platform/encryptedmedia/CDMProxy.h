@@ -247,6 +247,10 @@ public:
 
     virtual ~CDMProxy() = default;
 
+    // A decryptor receives its proxy as an untyped pointer from a GStreamer context, so it
+    // checks the concrete type before downcasting.
+    virtual bool isClearKey() const { return false; }
+
     void updateKeyStore(const KeyStore&);
     void unrefAllKeysFrom(const KeyStore&);
     void LEGACY_NODELETE setInstance(CDMInstanceProxy*);

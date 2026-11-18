@@ -27,6 +27,8 @@
 
 #if ENABLE(GPU_PROCESS) && USE(COORDINATED_GRAPHICS) && USE(SKIA)
 
+#include <wtf/Seconds.h>
+
 namespace WebCore {
 class CoordinatedTileBuffer;
 class IntRect;
@@ -40,6 +42,7 @@ namespace WebKit {
 // nearest smaller power of two, as Chromium decodes images at the scale they
 // are drawn; the copies are kept in a budget shared by every page.
 void replayRemoteTile(WebCore::CoordinatedTileBuffer&, const WebCore::SkiaRecordingResult&, const WebCore::IntRect& tileRect, const WebCore::IntRect& dirtyRect);
+void releaseUnusedRemoteTileImages(Seconds);
 
 } // namespace WebKit
 

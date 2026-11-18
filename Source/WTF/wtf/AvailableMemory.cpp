@@ -29,6 +29,11 @@
 #include <wtf/MathExtras.h>
 #include <wtf/MemoryFootprint.h>
 
+#if OS(LINUX)
+#include <cstdlib>
+#include <wtf/linux/CGroupMemoryLimit.h>
+#endif
+
 #if OS(DARWIN)
 #include <mach/mach.h>
 #include <wtf/RAMSize.h>
@@ -85,9 +90,16 @@ static size_t computeAvailableMemory()
     return roundUpToMultipleOf<128 * MB>(sizeAccordingToKernel);
 #elif OS(FREEBSD) || OS(LINUX)
     struct sysinfo info;
-    if (!sysinfo(&info))
-        return info.totalram * info.mem_unit;
-    return availableMemoryGuess;
+    size_t memory = !sysinfo(&info) ? info.totalram * info.mem_unit : availableMemoryGuess;
+#if OS(LINUX)
+    memory = Detail::linuxActualMemoryLimit();
+    // Sandboxed children may not see the controller hierarchy their launcher read.
+    if (const char* inherited = getenv("WEBKIT_NATIVE_MEMORY_BUDGET_BYTES")) {
+        if (auto limit = Detail::parseMemoryLimit(inherited))
+            memory = std::min(memory, *limit);
+    }
+#endif
+    return memory;
 #elif OS(UNIX) || OS(HAIKU)
     long pages = sysconf(_SC_PHYS_PAGES);
     long pageSize = sysconf(_SC_PAGE_SIZE);

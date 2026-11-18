@@ -260,6 +260,7 @@ set(WTF_PUBLIC_HEADERS
     PreciseSum.h
     PrintStream.h
     PriorityQueue.h
+    ProcessActivitySnapshot.h
     ProcessID.h
     ProcessMemoryStatus.h
     ProcessPrivilege.h
@@ -782,6 +783,7 @@ elseif (APPLE)
     )
 elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
     list(APPEND WTF_PUBLIC_HEADERS
+        linux/CGroupMemoryLimit.h
         linux/CurrentProcessMemoryStatus.h
         linux/HighPriorityThreads.h
         linux/ProcessMemoryFootprint.h

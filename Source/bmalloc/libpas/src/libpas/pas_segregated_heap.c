@@ -912,11 +912,15 @@ pas_segregated_heap_ensure_allocator_index(
             pas_allocator_index old_allocator_index;
             ensure_size_lookup(heap, config);
             PAS_ASSERT(index < heap->small_index_upper_bound, index, heap->small_index_upper_bound);
-            allocator_index_ptr = heap->index_to_small_allocator_index + index;
-            old_allocator_index = *allocator_index_ptr;
-            PAS_ASSERT(!old_allocator_index ||
-                old_allocator_index == allocator_index, old_allocator_index, allocator_index);
-            *allocator_index_ptr = (pas_allocator_index)allocator_index;
+            // Selection may precede a competing alignment-driven directory replacement.
+            if (pas_compact_atomic_segregated_size_directory_ptr_load(
+                    heap->index_to_small_size_directory + index) == directory) {
+                allocator_index_ptr = heap->index_to_small_allocator_index + index;
+                old_allocator_index = *allocator_index_ptr;
+                PAS_ASSERT(!old_allocator_index ||
+                    old_allocator_index == allocator_index, old_allocator_index, allocator_index);
+                *allocator_index_ptr = (pas_allocator_index)allocator_index;
+            }
         }
     } else {
         pas_segregated_heap_medium_directory_tuple* medium_directory;

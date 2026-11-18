@@ -32,12 +32,18 @@
 #include "FlatpakLauncher.h"
 #include "IPCUtilities.h"
 #include "ProcessExecutablePath.h"
+#include <atomic>
 #include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
 #include <sys/socket.h>
 #include <wtf/FileSystem.h>
+#include <wtf/AvailableMemory.h>
 #include <wtf/RunLoop.h>
+#if OS(LINUX)
+#include <wtf/linux/CGroupMemoryLimit.h>
+#endif
+#include <wtf/text/MakeString.h>
 #include <wtf/UniStdExtras.h>
 #include <wtf/glib/GUniquePtr.h>
 #include <wtf/glib/Sandbox.h>
@@ -56,6 +62,19 @@
 #include <wtf/text/StringToIntegerConversion.h>
 #include <wtf/text/StringView.h>
 #include <wtf/unix/UnixFileDescriptor.h>
+#endif
+
+#if PLATFORM(WPE)
+#include <wpe/WebKitDefines.h>
+
+static std::atomic<uint64_t> webProcessMemoryBudget;
+static std::atomic<uint64_t> sharedProcessMemoryBudget;
+
+extern "C" WEBKIT_API void webkit_enzui_set_process_memory_budgets_v1(uint64_t webBytes, uint64_t sharedBytes)
+{
+    webProcessMemoryBudget.store(webBytes, std::memory_order_relaxed);
+    sharedProcessMemoryBudget.store(sharedBytes, std::memory_order_relaxed);
+}
 #endif
 
 namespace WebKit {
@@ -232,6 +251,21 @@ void ProcessLauncher::launchProcess()
     //
     // Please keep this comment in sync with the duplicate comment in XDGDBusProxy::launch.
     GRefPtr<GSubprocessLauncher> launcher = adoptGRef(g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_INHERIT_FDS));
+#if OS(LINUX)
+    auto actualLimit = WTF::Detail::linuxActualMemoryLimit();
+    auto inheritedLimit = makeString(actualLimit).utf8();
+    g_subprocess_launcher_setenv(launcher.get(), "WEBKIT_NATIVE_ACTUAL_MEMORY_LIMIT_BYTES", inheritedLimit.legacyCStringPointer(), TRUE);
+    auto effectiveBudget = actualLimit;
+#if PLATFORM(WPE)
+    auto requestedBudget = m_launchOptions.processType == ProcessLauncher::ProcessType::Web
+        ? webProcessMemoryBudget.load(std::memory_order_relaxed)
+        : sharedProcessMemoryBudget.load(std::memory_order_relaxed);
+    if (requestedBudget)
+        effectiveBudget = std::min<uint64_t>(effectiveBudget, requestedBudget);
+#endif
+    auto memoryBudget = makeString(effectiveBudget).utf8();
+    g_subprocess_launcher_setenv(launcher.get(), "WEBKIT_NATIVE_MEMORY_BUDGET_BYTES", memoryBudget.legacyCStringPointer(), TRUE);
+#endif
     int webkitClientSocketValue = webkitSocketPair.client.release();
     g_subprocess_launcher_take_fd(launcher.get(), webkitClientSocketValue, webkitClientSocketValue);
 

@@ -39,7 +39,8 @@ pas_get_page_base_and_kind_for_small_other_in_fast_megapage(uintptr_t begin, pas
         pas_page_base* page_base;
         page_base = pas_page_base_for_address_and_page_config(begin, config.small_bitfit_config.base);
         if (config.small_segregated_config.base.is_enabled
-            && config.small_segregated_is_in_megapage) {
+            && config.small_segregated_is_in_megapage
+            && !config.small_segregated_uses_exclusive_fast_megapage_kind) {
             PAS_ASSERT(config.small_bitfit_config.base.page_size
                        == config.small_segregated_config.base.page_size);
             PAS_ASSERT(
@@ -47,6 +48,7 @@ pas_get_page_base_and_kind_for_small_other_in_fast_megapage(uintptr_t begin, pas
                 == page_base);
             return pas_page_base_and_kind_create(page_base, pas_page_base_get_kind(page_base));
         }
+        PAS_ASSERT(pas_page_base_get_kind(page_base) == pas_small_bitfit_page_kind);
         return pas_page_base_and_kind_create(page_base, pas_small_bitfit_page_kind);
     }
 

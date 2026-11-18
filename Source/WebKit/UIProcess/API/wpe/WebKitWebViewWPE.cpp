@@ -25,11 +25,14 @@
 #include "WebInspectorUIProxy.h"
 #include "WebProcessMessages.h"
 #include "WebProcessProxy.h"
+#include "WebProcessPool.h"
 #include "WebKitColorPrivate.h"
 #include "WebKitScriptDialogPrivate.h"
 #include "WebKitWebViewPrivate.h"
 #include <WebCore/CSSValueKeywords.h>
 #include <WebCore/PlatformRenderTheme.h>
+#include <cstdlib>
+#include <string_view>
 
 #if ENABLE(WPE_PLATFORM)
 #include <wpe/wpe-platform.h>
@@ -296,10 +299,68 @@ guint createShowOptionMenuSignal(WebKitWebViewClass* webViewClass)
 // and font caches, then a synchronous garbage collection and malloc trim. The
 // pages stay loaded. Unlike a memory pressure event, a release is not skipped
 // during the hold-off that follows an earlier one.
+typedef gboolean (*EnzuiTakeFocusCallback)(WebKitWebView*, gboolean backward, gpointer userData);
+
+struct EnzuiTakeFocusHandler {
+    EnzuiTakeFocusCallback callback;
+    gpointer userData;
+    GDestroyNotify destroy;
+};
+
+static const char* enzuiTakeFocusKey = "enzui-take-focus-handler";
+
+// Called when Tab or Shift+Tab moves past the last or first focusable element
+// of the page. A host that installed a callback decides whether it takes the
+// focus; without one, WebKit keeps it in the page as before.
+extern "C" WEBKIT_API void webkit_web_view_enzui_set_take_focus_callback_v1(WebKitWebView* webView, EnzuiTakeFocusCallback callback, gpointer userData, GDestroyNotify destroy)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    if (!callback) {
+        g_object_set_data(G_OBJECT(webView), enzuiTakeFocusKey, nullptr);
+        return;
+    }
+    auto* handler = g_new0(EnzuiTakeFocusHandler, 1);
+    *handler = { callback, userData, destroy };
+    g_object_set_data_full(G_OBJECT(webView), enzuiTakeFocusKey, handler, +[](gpointer data) {
+        auto* handler = static_cast<EnzuiTakeFocusHandler*>(data);
+        if (handler->destroy)
+            handler->destroy(handler->userData);
+        g_free(handler);
+    });
+}
+
+bool webkitWebViewEnzuiTakeFocus(WebKitWebView* webView, bool backward)
+{
+    auto* handler = static_cast<EnzuiTakeFocusHandler*>(g_object_get_data(G_OBJECT(webView), enzuiTakeFocusKey));
+    return handler && handler->callback(webView, backward, handler->userData);
+}
+
+extern "C" WEBKIT_API guint64 webkit_web_view_enzui_current_renderer_pid_v1(WebKitWebView* webView)
+{
+    g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), 0);
+    auto& page = webkitWebViewGetPage(webView);
+    if (!page.hasRunningProcess())
+        return 0;
+    return page.legacyMainFrameProcess().processID();
+}
+
 extern "C" WEBKIT_API void webkit_web_view_enzui_release_memory_v1(WebKitWebView* webView)
 {
     g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
-    webkitWebViewGetPage(webView).forEachWebContentProcess([](auto& process, auto) {
+    auto& page = webkitWebViewGetPage(webView);
+    // A coalesced hide must reach the web process before critical relief can discard its tiles.
+    page.activityStateDidChange({ }, WebKit::WebPageProxy::ActivityStateChangeDispatchMode::Immediate);
+    static bool traceOwnership = [] {
+        const char* value = std::getenv("WEBKIT_TRACE_PROCESS_OWNERSHIP");
+        return value && std::string_view(value) == "1";
+    }();
+    if (traceOwnership) {
+        for (auto& pool : WebKit::WebProcessPool::allProcessPools()) {
+            for (auto& process : pool->processes())
+                WTFLogAlways("WPE_PROCESS_OWNERSHIP pid=%lld pages=%u provisional=%u remote=%u suspended=%u cached=%d prewarmed=%d workers=%d", static_cast<long long>(process->processID()), process->pageCount(), process->provisionalPageCount(), process->remotePageCount(), process->suspendedPageCount(), process->isInProcessCache(), process->isPrewarmed(), process->isRunningWorkers());
+        }
+    }
+    page.forEachWebContentProcess([](auto& process, auto) {
         process.sendWithAsyncReply(Messages::WebProcess::ReleaseMemory(), [] { }, 0);
     });
 }

@@ -61,7 +61,8 @@ size_t pas_heap_runtime_config_aggressive_view_cache_capacity(
 
     PAS_ASSERT(page_config->base.page_size < cache_size);
 
-    return cache_size / page_config->base.page_size;
+    // View-cache capacities must fit their uint8_t storage.
+    return PAS_MIN(cache_size / page_config->base.page_size, (size_t)UINT8_MAX);
 }
 
 #endif /* LIBPAS_ENABLED */

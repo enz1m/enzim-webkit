@@ -183,7 +183,9 @@ if (ENABLE_SPEECH_SYNTHESIS)
             ${Flite_INCLUDE_DIRS}
         )
         list(APPEND WebCore_LIBRARIES
-            ${Flite_LIBRARIES}
+            ${Flite_LIBRARY}
+            ${Flite_Usenglish_LIBRARY}
+            ${Flite_Cmulex_LIBRARY}
         )
     endif ()
 endif ()
