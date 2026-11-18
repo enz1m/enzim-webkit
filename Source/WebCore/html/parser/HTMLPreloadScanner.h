@@ -107,6 +107,7 @@ public:
     void appendToEnd(const SegmentedString&);
     void scan(HTMLResourcePreloader&, Document&);
     bool stopsAtHttpEquiv() const { return m_stopAtHttpEquiv; }
+    bool stoppedAtHttpEquiv() const { return m_stoppedAtHttpEquiv; }
 
 private:
     TokenPreloadScanner m_scanner;

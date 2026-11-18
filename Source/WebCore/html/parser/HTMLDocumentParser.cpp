@@ -349,10 +349,20 @@ void HTMLDocumentParser::pumpTokenizer(SynchronousMode mode)
 #if PLATFORM(WPE)
         static const bool rebaseStreamPreload = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD_REBASE")) != "0"_s;
         if (rebaseStreamPreload && m_preloadScanner && m_preloadScanner->stopsAtHttpEquiv()) {
-            // Restart from input the real parser has not consumed. Earlier meta
-            // policies have taken effect, and later ones still stop speculation.
-            stopAtHttpEquiv = true;
-            m_preloadScanner = nullptr;
+            static const bool rebaseUnstopped = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD_REBASE_UNSTOPPED")) == "1"_s;
+            bool wasStopped = m_preloadScanner->stoppedAtHttpEquiv();
+            bool shouldRebase = wasStopped || rebaseUnstopped;
+            static const bool trace = StringView::fromLatin1(std::getenv("WPE_STREAM_PRELOAD_REBASE_TRACE")) == "1"_s;
+            static unsigned traceBudget = 96;
+            if (trace && traceBudget) {
+                --traceBudget;
+                dataLogLn("WPE_STREAM_PRELOAD_REBASE stopped=", wasStopped, " rebase=", shouldRebase, " remaining=", m_input.current().length());
+            }
+            if (shouldRebase) {
+                // Preserve live tokenizer/picture state; restart only after a policy barrier.
+                stopAtHttpEquiv = true;
+                m_preloadScanner = nullptr;
+            }
         }
 #endif
         if (!m_preloadScanner) {
