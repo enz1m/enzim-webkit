@@ -33,7 +33,9 @@
 #include "DocumentView.h"
 #include "LocalFrameView.h"
 #include <wtf/HashMap.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/RunLoop.h>
 #include <wtf/RefCounted.h>
 #include <wtf/SetForScope.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -43,6 +45,7 @@
 #include "DocumentLoader.h"
 #include "EventLoop.h"
 #include "FrameDestructionObserverInlines.h"
+#include "HTMLBodyElement.h"
 #include "HTMLDocument.h"
 #include "HTMLParserScheduler.h"
 #include "HTMLPreloadScanner.h"
@@ -58,6 +61,8 @@
 #include "Microtasks.h"
 #include "NavigationScheduler.h"
 #include "NodeDocument.h"
+#include "NodeTraversal.h"
+#include "Page.h"
 #include "ScriptElement.h"
 #include "TaskSource.h"
 #include "ThrowOnDynamicMarkupInsertionCountIncrementer.h"
@@ -584,12 +589,86 @@ void HTMLDocumentParser::end()
     m_treeBuilder->finished();
 }
 
+#if PLATFORM(WPE)
+// Deferred scripts that are already loaded, as on a revisit served from the cache, would run the
+// moment parsing ends, and the page's first paint would wait for all of them. A visible page with
+// content that has not painted yet gets up to firstPaintBeforeDeferredScriptsLimit to paint first.
+// A page that has painted, and one whose body is a shell for its scripts to fill, run them at once.
+// WPE_PAINT_BEFORE_DEFERRED_SCRIPTS=0 never waits.
+static constexpr Seconds firstPaintBeforeDeferredScriptsLimit { 100_ms };
+static constexpr Seconds firstPaintPoll { 4_ms };
+static constexpr unsigned elementsWorthPainting = 64;
+
+struct FirstPaintWait {
+    MonotonicTime deadline;
+    bool pollScheduled { false };
+};
+
+static HashMap<const HTMLDocumentParser*, FirstPaintWait>& firstPaintWaits()
+{
+    static NeverDestroyed<HashMap<const HTMLDocumentParser*, FirstPaintWait>> waits;
+    return waits;
+}
+
+static bool firstPaintIsStillToCome(Document& document)
+{
+    static const bool enabled = StringView::fromLatin1(std::getenv("WPE_PAINT_BEFORE_DEFERRED_SCRIPTS")) != "0"_s;
+    if (!enabled)
+        return false;
+    RefPtr frame = document.frame();
+    RefPtr view = document.view();
+    RefPtr page = document.page();
+    if (!frame || !view || !page || !frame->isMainFrame() || !page->isVisible() || view->hasEverPainted())
+        return false;
+    RefPtr body = document.body();
+    if (!body || !document.haveStylesheetsLoaded())
+        return false;
+    unsigned elements = 0;
+    for (RefPtr<Node> node = body->firstChild(); node; node = NodeTraversal::next(*node, body.get())) {
+        if (is<Element>(*node) && ++elements >= elementsWorthPainting)
+            return true;
+    }
+    return false;
+}
+#endif
+
 void HTMLDocumentParser::attemptToRunDeferredScriptsAndEnd()
 {
     ASSERT(isStopping());
     ASSERT(!hasInsertionPoint());
+#if PLATFORM(WPE)
+    if (m_scriptRunner && m_scriptRunner->hasLoadedScriptWaitingForParsing()) {
+        RefPtr document = this->document();
+        auto now = MonotonicTime::now();
+        auto& wait = firstPaintWaits().ensure(this, [&] {
+            return FirstPaintWait { now + firstPaintBeforeDeferredScriptsLimit };
+        }).iterator->value;
+        if (now < wait.deadline && document && firstPaintIsStillToCome(*document)) {
+            if (!wait.pollScheduled) {
+                wait.pollScheduled = true;
+                RunLoop::mainSingleton().dispatchAfter(firstPaintPoll, [protectedThis = Ref { *this }] {
+                    auto found = firstPaintWaits().find(protectedThis.ptr());
+                    if (found != firstPaintWaits().end())
+                        found->value.pollScheduled = false;
+                    if (protectedThis->isStopped() || protectedThis->isDetached()) {
+                        firstPaintWaits().remove(protectedThis.ptr());
+                        return;
+                    }
+                    // A script that is running finishes the list itself.
+                    if (protectedThis->isExecutingScript())
+                        return;
+                    protectedThis->attemptToRunDeferredScriptsAndEnd();
+                });
+            }
+            return;
+        }
+    }
+#endif
     if (m_scriptRunner && !m_scriptRunner->executeScriptsWaitingForParsing())
         return;
+#if PLATFORM(WPE)
+    firstPaintWaits().remove(this);
+#endif
     end();
 }
 

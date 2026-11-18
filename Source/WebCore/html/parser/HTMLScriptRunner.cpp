@@ -221,6 +221,13 @@ bool HTMLScriptRunner::executeScriptsWaitingForParsing()
     return true;
 }
 
+#if PLATFORM(WPE)
+bool HTMLScriptRunner::hasLoadedScriptWaitingForParsing() const
+{
+    return !m_scriptsToExecuteAfterParsing.isEmpty() && protect(m_scriptsToExecuteAfterParsing.first())->isLoaded();
+}
+#endif
+
 static Ref<PendingScript> requestPendingScript(ScriptElement& scriptElement)
 {
     ASSERT(scriptElement.willBeParserExecuted());
