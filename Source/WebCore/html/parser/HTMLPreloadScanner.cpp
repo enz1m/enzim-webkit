@@ -693,6 +693,15 @@ void HTMLPreloadScanner::scan(HTMLResourcePreloader& preloader, Document& docume
             && equalLettersIgnoringASCIICase(StringView(token->name().span()), "meta"_s)) {
             for (auto& attribute : token->attributes()) {
                 if (equalLettersIgnoringASCIICase(StringView(attribute.name.span()), "http-equiv"_s)) {
+#if PLATFORM(WPE)
+                    static const bool skipIgnoredEquiv = [] {
+                        const char* value = getenv("WPE_PRELOAD_IGNORED_HTTP_EQUIV");
+                        return !value || *value != '0';
+                    }();
+                    // X-UA-Compatible has no effect in Document::processMetaHttpEquiv.
+                    if (skipIgnoredEquiv && equalLettersIgnoringASCIICase(StringView(attribute.value.span()), "x-ua-compatible"_s))
+                        continue;
+#endif
                     m_stoppedAtHttpEquiv = true;
                     break;
                 }
