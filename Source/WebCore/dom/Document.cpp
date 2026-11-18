@@ -1334,6 +1334,10 @@ struct QuerySelectorResults {
     WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(QuerySelectorResults);
 public:
     static constexpr unsigned maxSize = 8;
+    static constexpr unsigned expandedSize = 32;
+    static constexpr size_t referenceBudget = 4096;
+    static constexpr size_t maxExpandableResult = 64;
+    explicit QuerySelectorResults(bool isDocument) : isDocument(isDocument) { }
 
     struct Entry {
         String selector;
@@ -1351,12 +1355,41 @@ public:
 
     void add(Entry&& entry)
     {
-        if (entries.size() >= maxSize)
+        unsigned capacity = maxSize;
+#if PLATFORM(WPE)
+        static const bool expandedBudget = [] {
+            const char* value = getenv("WPE_QUERY_RESULT_BUDGET");
+            return !value || *value != '0';
+        }();
+        auto references = [](const Entry& value) -> size_t {
+            return WTF::switchOn(value.result, [](const Ref<NodeList>& list) -> size_t { return list->length(); },
+                [](const RefPtr<Element>& element) -> size_t { return !!element; });
+        };
+        size_t incoming = references(entry);
+        size_t retained = incoming;
+        if (expandedBudget && isDocument && incoming <= maxExpandableResult) {
+            for (auto& existing : entries) {
+                retained += std::min<size_t>(references(existing), referenceBudget + 1);
+                if (retained > referenceBudget)
+                    break;
+            }
+            if (retained <= referenceBudget)
+                capacity = expandedSize;
+        }
+        static const bool trace = getenv("WPE_QUERY_RESULT_CACHE_TRACE");
+        static unsigned traceBudget = 64;
+        if (trace && traceBudget && isDocument) {
+            --traceBudget;
+            dataLogLn("WPE_QUERY_RESULT_CACHE capacity=", capacity, " retained=", retained, " incoming=", incoming);
+        }
+#endif
+        while (entries.size() >= capacity)
             entries.removeAt(weakRandomNumber<uint32_t>() % entries.size());
         entries.append(WTF::move(entry));
     }
 
     Vector<Entry, maxSize> entries;
+    bool isDocument;
 };
 
 QuerySelectorResults* Document::querySelectorResults(ContainerNode& context)
@@ -1371,7 +1404,7 @@ QuerySelectorResults& Document::ensureQuerySelectorResults(ContainerNode& contex
 {
     return *m_querySelectorResults.ensure(context, [&] {
         context.setHasValidQuerySelectorResults(true);
-        return makeUnique<QuerySelectorResults>();
+        return makeUnique<QuerySelectorResults>(context.isDocumentNode());
     }).iterator->value;
 }
 

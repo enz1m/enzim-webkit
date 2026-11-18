@@ -1343,8 +1343,9 @@ ExceptionOr<Element*> ContainerNode::querySelector(const String& selectors)
         return query.releaseException();
     auto& selectorQuery = query.releaseReturnValue();
     RefPtr result = selectorQuery.queryFirst(*this);
-    if (selectorQuery.shouldStoreInDocument())
-        document->addResultForSelector(*this, selectors, result.get(), selectorQuery.classNameToMatch());
+    auto classNameToMatch = selectorQuery.classNameToMatch();
+    if (selectorQuery.shouldStoreInDocument() || !classNameToMatch.isNull())
+        document->addResultForSelector(*this, selectors, result.get(), classNameToMatch);
     return result.get();
 }
 
@@ -1356,8 +1357,8 @@ ExceptionOr<Ref<NodeList>> ContainerNode::querySelectorAll(const String& selecto
     auto query = document->selectorQueryForString(selectors);
     if (query.hasException())
         return query.releaseException();
-    auto isCacheable = query.returnValue().shouldStoreInDocument();
     auto classNameToMatch = query.returnValue().classNameToMatch();
+    auto isCacheable = query.returnValue().shouldStoreInDocument() || !classNameToMatch.isNull();
     auto nodeList = query.releaseReturnValue().queryAll(*this);
     if (isCacheable)
         document->addResultForSelectorAll(*this, selectors, nodeList, classNameToMatch);

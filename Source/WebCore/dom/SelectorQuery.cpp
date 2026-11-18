@@ -398,11 +398,28 @@ ALWAYS_INLINE void SelectorDataList::executeSingleClassNameSelectorData(const Co
 
 AtomString SelectorDataList::classNameToMatch() const
 {
-    if (m_matchType != MatchType::ClassNameMatch)
-        return nullAtom();
-    ASSERT(m_selectors.size() == 1);
-    ASSERT(isSingleClassNameSelector(m_selectors.first().selector));
-    return m_selectors.first().selector.value();
+    if (m_matchType == MatchType::ClassNameMatch) {
+        ASSERT(m_selectors.size() == 1);
+        ASSERT(isSingleClassNameSelector(m_selectors.first().selector));
+        return m_selectors.first().selector.value();
+    }
+#if PLATFORM(WPE)
+    static const bool cacheSimpleCompounds = [] {
+        const char* value = getenv("WPE_SIMPLE_QUERY_CACHE");
+        return !value || *value != '0';
+    }();
+    if (cacheSimpleCompounds && m_selectors.size() == 1) {
+        const auto& first = m_selectors.first().selector;
+        const auto* second = first.precedingInComplexSelector();
+        if (first.relation() == CSSSelector::Relation::Subselector && second && !second->precedingInComplexSelector()) {
+            if (first.match() == CSSSelector::Match::Class && second->match() == CSSSelector::Match::Tag)
+                return first.value();
+            if (first.match() == CSSSelector::Match::Tag && second->match() == CSSSelector::Match::Class)
+                return second->value();
+        }
+    }
+#endif
+    return nullAtom();
 }
 
 template<typename OutputType>
