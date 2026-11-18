@@ -113,6 +113,7 @@
 #include "FocusController.h"
 #include "FocusEvent.h"
 #include "FocusOptions.h"
+#include "FontCascadeCacheInvalidation.h"
 #include "FontCascadeInlines.h"
 #include "FontFaceSet.h"
 #include "FormController.h"
@@ -386,12 +387,14 @@
 #include <JavaScriptCore/VM.h>
 #include <JavaScriptCore/WeakInlines.h>
 #include <algorithm>
+#include <cstdlib>
 #include <ctime>
 #include <ranges>
 #include <wtf/ASCIICType.h>
 #include <wtf/Assertions.h>
 #include <wtf/Borrow.h>
 #include <wtf/CryptographicallyRandomNumber.h>
+#include <wtf/DataLog.h>
 #include <wtf/HexNumber.h>
 #include <wtf/Language.h>
 #include <wtf/NeverDestroyed.h>
@@ -402,6 +405,7 @@
 #include <wtf/UUID.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringBuffer.h>
+#include <wtf/text/StringView.h>
 #include <wtf/text/TextPosition.h>
 #include <wtf/text/TextStream.h>
 
@@ -3542,10 +3546,78 @@ void Document::pageSizeAndMarginsInPixels(int pageIndex, IntSize& pageSize, int&
     marginLeft = style->marginLeft().isAuto() ? marginLeft : Style::evaluate<int>(style->marginLeft(), pageSize.width(), zoomFactor);
 }
 
-void Document::fontsNeedUpdate(FontSelector&)
+void Document::fontsNeedUpdate(FontSelector& selector)
 {
     ASSERT(!deletionHasBegun());
-    invalidateMatchedPropertiesCacheAndForceStyleRecalc();
+    Vector<Ref<Element>, 8> cachedComputedStyles;
+    {
+        FontLoadStyleInvalidationScope fontLoadScope(dynamicDowncast<CSSFontSelector>(&selector));
+        static const bool targetedFontStyle = StringView::fromLatin1(std::getenv("WPE_TARGETED_FONT_STYLE")) != "0"_s;
+        if (targetedFontStyle && isFontLoadStyleInvalidationActive() && renderView() && view()
+            && backForwardCacheState() == NotInBackForwardCache && !inRenderTreeUpdate()
+            && !isResolvingTreeStyle() && !view()->layoutContext().isInLayout()) {
+            styleScope().invalidateMatchedDeclarationsCache();
+            HashMap<const FontCascade*, bool> affectedFonts;
+            auto fontChanged = [&](const Style::ComputedStyle& style) {
+                const auto* font = &style.fontCascade();
+                if (auto iterator = affectedFonts.find(font); iterator != affectedFonts.end())
+                    return iterator->value;
+                bool affected = !canPreserveStyleAfterFontLoad(style, style);
+                if (affectedFonts.size() < 64)
+                    affectedFonts.add(font, affected);
+                return affected;
+            };
+            unsigned scanned = 0;
+            unsigned marked = 0;
+            bool rootMarked = false;
+            Vector<Ref<ContainerNode>, 8> roots;
+            roots.append(*this);
+            while (!roots.isEmpty()) {
+                Ref root = roots.takeLast();
+                for (auto& element : descendantsOfType<Element>(root)) {
+                    if (auto* shadow = element.shadowRoot())
+                        roots.append(*shadow);
+                    ++scanned;
+                    auto* renderStyle = element.renderOrDisplayContentsStyle();
+                    auto* computedStyle = element.existingComputedStyle();
+                    bool affected = !renderStyle && !computedStyle;
+                    Vector<const Style::ComputedStyle*, 8> styles;
+                    if (renderStyle)
+                        styles.append(renderStyle);
+                    if (computedStyle && computedStyle != renderStyle)
+                        styles.append(computedStyle);
+                    while (!styles.isEmpty() && !affected) {
+                        const auto* style = styles.takeLast();
+                        if (fontChanged(*style)) {
+                            affected = true;
+                            break;
+                        }
+                        for (auto& pseudoStyle : style->pseudoElementStyles().values()) {
+                            if (pseudoStyle)
+                                styles.append(pseudoStyle.get());
+                        }
+                    }
+                    if (affected) {
+                        element.invalidateStyleForSubtree();
+                        if (!element.renderer() && computedStyle)
+                            cachedComputedStyles.append(element);
+                        ++marked;
+                        rootMarked |= &element == documentElement();
+                    }
+                }
+            }
+            static const bool trace = StringView::fromLatin1(std::getenv("WPE_TARGETED_FONT_STYLE_TRACE")) == "1"_s;
+            static unsigned traceBudget = 32;
+            if (trace && traceBudget) {
+                --traceBudget;
+                dataLogLn("WPE_TARGETED_FONT_STYLE scanned=", scanned, " marked=", marked, " root=", rootMarked);
+            }
+        } else
+            invalidateMatchedPropertiesCacheAndForceStyleRecalc();
+    }
+    // Non-rendered cached styles can outlive the scheduled render-tree update.
+    for (auto& element : cachedComputedStyles)
+        element->resetComputedStyle();
     InspectorInstrumentation::fontDataChanged(*this);
 }
 

@@ -66,7 +66,10 @@
 #include "TextUtil.h"
 #include "VisiblePosition.h"
 #include "WidthIterator.h"
+#include <cstdlib>
+#include <wtf/DataLog.h>
 #include <wtf/BitSet.h>
+#include <wtf/text/StringView.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/SortedArrayMap.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -520,6 +523,20 @@ void RenderText::initiateFontLoadingByAccessingGlyphDataAndComputeCanUseSimplifi
         run.setCharacterScanForCodePath(false);
         m_canUseSimplifiedTextMeasuring = fontCascade.codePath(run) == FontCascade::CodePath::Simple;
     }
+
+#if PLATFORM(WPE) && USE(SKIA)
+    static const bool earlyComplexFonts = StringView::fromLatin1(std::getenv("WPE_EARLY_COMPLEX_FONT_LOAD")) != "0"_s;
+    if (earlyComplexFonts && !*m_canUseSimplifiedTextMeasuring && !textContent.isEmpty()) {
+        // Simplified-measuring rejection must not postpone an interstitial font download until layout.
+        auto glyphData = fontCascade.glyphDataForCharacter(StringView(textContent).codePointAt(0), false, fontVariant);
+        static const bool trace = StringView::fromLatin1(std::getenv("WPE_EARLY_COMPLEX_FONT_LOAD_TRACE")) == "1"_s;
+        static thread_local unsigned traceBudget = 64;
+        if (trace && traceBudget && glyphData.font) {
+            --traceBudget;
+            dataLogLn("WPE_EARLY_COMPLEX_FONT_LOAD queried=true");
+        }
+    }
+#endif
 
     m_hasPositionDependentContentWidth = false;
     m_hasStrongDirectionalityContent = false;

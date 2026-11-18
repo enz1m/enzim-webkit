@@ -36,6 +36,9 @@
 #include "HTMLDocument.h"
 #include "HTMLParserScheduler.h"
 #include "HTMLPreloadScanner.h"
+#include <cstdlib>
+#include <wtf/DataLog.h>
+#include <wtf/text/StringView.h>
 #include "HTMLScriptRunner.h"
 #include "HTMLTreeBuilder.h"
 #include "HTMLUnknownElement.h"
@@ -431,6 +434,22 @@ void HTMLDocumentParser::append(RefPtr<StringImpl>&& inputSource, SynchronousMod
     Ref<HTMLDocumentParser> protectedThis(*this);
 
     String source { WTF::move(inputSource) };
+
+#if PLATFORM(WPE)
+    static const bool earlyHeadPreload = StringView::fromLatin1(std::getenv("WPE_EARLY_HEAD_PRELOAD")) != "0"_s;
+    if (earlyHeadPreload && m_options.scriptingFlag && synchronousMode == SynchronousMode::AllowYield
+        && !isParsingFragment() && !inPumpSession() && !document()->documentElement()) {
+        HTMLPreloadScanner headScanner(m_options, document()->url(), document()->deviceScaleFactor(), true);
+        headScanner.appendToEnd(source.left(8192));
+        headScanner.scan(*m_preloader, *protect(document()));
+        static const bool trace = StringView::fromLatin1(std::getenv("WPE_EARLY_HEAD_PRELOAD_TRACE")) == "1"_s;
+        static unsigned traceBudget = 32;
+        if (trace && traceBudget) {
+            --traceBudget;
+            dataLogLn("WPE_EARLY_HEAD_PRELOAD scanned=", std::min<size_t>(source.length(), 8192));
+        }
+    }
+#endif
 
     if (m_preloadScanner) {
         if (m_input.current().isEmpty() && !isWaitingForScripts()) {

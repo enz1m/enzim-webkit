@@ -33,6 +33,22 @@ namespace WebCore {
 
 class CSSFontFace;
 class CSSFontSelector;
+namespace Style { class ComputedStyle; }
+
+class FontLoadStyleInvalidationScope {
+public:
+    explicit FontLoadStyleInvalidationScope(CSSFontSelector*);
+    ~FontLoadStyleInvalidationScope();
+    FontLoadStyleInvalidationScope(const FontLoadStyleInvalidationScope&) = delete;
+    FontLoadStyleInvalidationScope& operator=(const FontLoadStyleInvalidationScope&) = delete;
+private:
+    CSSFontSelector* m_previous { nullptr };
+    bool m_active { false };
+};
+
+bool isFontLoadStyleInvalidationActive();
+bool canPreserveStyleAfterFontLoad(const Style::ComputedStyle&, const Style::ComputedStyle&);
+class CSSFontSelector;
 
 void recordFontLoadForCascadeCache(CSSFontSelector&, CSSFontFace&);
 

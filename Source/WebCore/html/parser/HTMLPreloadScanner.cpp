@@ -619,9 +619,10 @@ void TokenPreloadScanner::updatePredictedBaseURL(const HTMLToken& token, bool sh
         m_predictedBaseElementURL = WTF::move(temp);
 }
 
-HTMLPreloadScanner::HTMLPreloadScanner(const HTMLParserOptions& options, const URL& documentURL, float deviceScaleFactor)
+HTMLPreloadScanner::HTMLPreloadScanner(const HTMLParserOptions& options, const URL& documentURL, float deviceScaleFactor, bool stopAtHttpEquiv)
     : m_scanner(documentURL, deviceScaleFactor)
     , m_tokenizer(options)
+    , m_stopAtHttpEquiv(stopAtHttpEquiv)
 {
 }
 
@@ -640,9 +641,22 @@ void HTMLPreloadScanner::scan(HTMLResourcePreloader& preloader, Document& docume
     if (!startingBaseElementURL.isEmpty())
         m_scanner.setPredictedBaseElementURL(startingBaseElementURL);
 
+    if (m_stoppedAtHttpEquiv)
+        return;
     PreloadRequestStream requests;
 
     while (auto token = m_tokenizer.nextToken(m_source)) {
+        if (m_stopAtHttpEquiv && token->type() == HTMLToken::Type::StartTag
+            && equalLettersIgnoringASCIICase(StringView(token->name().span()), "meta"_s)) {
+            for (auto& attribute : token->attributes()) {
+                if (equalLettersIgnoringASCIICase(StringView(attribute.name.span()), "http-equiv"_s)) {
+                    m_stoppedAtHttpEquiv = true;
+                    break;
+                }
+            }
+            if (m_stoppedAtHttpEquiv)
+                break;
+        }
         if (token->type() == HTMLToken::Type::StartTag)
             m_tokenizer.updateStateFor(AtomString::lookUp(token->name().span()));
         m_scanner.scan(*token, requests, document);

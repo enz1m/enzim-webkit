@@ -35,11 +35,14 @@
 #include "CSSFontFamilyNameValue.h"
 #include "CSSFontSelector.h"
 #include "CSSSegmentedFontFace.h"
+#include "Document.h"
 #include "DocumentSettingsValues.h"
+#include "ElementInlines.h"
 #include "FontCache.h"
 #include "FontCascadeCacheInvalidation.h"
 #include "FontCascadeDescription.h"
 #include "ScriptExecutionContext.h"
+#include "StyleComputedStyle+GettersInlines.h"
 #include "TextShapingResultAndDisplayList.h"
 #include "WebKitFontFamilyNames.h"
 #include <cstdlib>
@@ -205,6 +208,64 @@ void recordFontLoadForCascadeCache(CSSFontSelector& selector, CSSFontFace& face)
     if (transitions.size() == 64)
         transitions.removeAt(0);
     transitions.append({ selector.uniqueId(), selector.version() + 1, family, WeakPtr { face } });
+}
+
+namespace {
+CSSFontSelector* activeFontLoadStyleSelector;
+
+std::optional<FontLoadTransition> currentFontLoad(CSSFontSelector& selector)
+{
+    for (auto& transition : std::views::reverse(fontLoadTransitions())) {
+        if (transition.selectorID == selector.uniqueId() && transition.version == selector.version())
+            return transition;
+    }
+    return std::nullopt;
+}
+}
+
+FontLoadStyleInvalidationScope::FontLoadStyleInvalidationScope(CSSFontSelector* selector)
+{
+    static const bool enabled = StringView::fromLatin1(std::getenv("WPE_FONT_STYLE_CACHE")) != "0"_s;
+    if (!fontCascadeReuseEnabled() || !enabled)
+        return;
+    m_previous = activeFontLoadStyleSelector;
+    m_active = true;
+    activeFontLoadStyleSelector = nullptr;
+    if (!selector)
+        return;
+    auto transition = currentFontLoad(*selector);
+    RefPtr document = dynamicDowncast<Document>(selector->scriptExecutionContext());
+    auto* root = document ? document->documentElement() : nullptr;
+    auto* rootStyle = root ? root->renderOrDisplayContentsStyle() : nullptr;
+    if (!transition || !rootStyle)
+        return;
+    // rch/rex and other root-font metrics can affect styles with unrelated local fonts.
+    if (fontLoadAffectsCascade(*selector, rootStyle->fontCascade().fontDescription(), *transition))
+        return;
+    activeFontLoadStyleSelector = selector;
+}
+
+FontLoadStyleInvalidationScope::~FontLoadStyleInvalidationScope()
+{
+    if (m_active)
+        activeFontLoadStyleSelector = m_previous;
+}
+
+bool isFontLoadStyleInvalidationActive()
+{
+    return isMainThread() && activeFontLoadStyleSelector;
+}
+
+bool canPreserveStyleAfterFontLoad(const Style::ComputedStyle& style, const Style::ComputedStyle& parentStyle)
+{
+    ASSERT(isFontLoadStyleInvalidationActive());
+    auto& selector = *activeFontLoadStyleSelector;
+    if ((style.fontCascade().fontSelector() && style.fontCascade().fontSelector() != &selector)
+        || (parentStyle.fontCascade().fontSelector() && parentStyle.fontCascade().fontSelector() != &selector))
+        return false;
+    auto transition = currentFontLoad(selector);
+    return transition && !fontLoadAffectsCascade(selector, style.fontCascade().fontDescription(), *transition)
+        && !fontLoadAffectsCascade(selector, parentStyle.fontCascade().fontDescription(), *transition);
 }
 
 Ref<FontCascadeFonts> FontCascadeCache::retrieveOrAddCachedFonts(const FontCascadeDescription& fontDescription, FontSelector* fontSelector)

@@ -101,7 +101,7 @@ private:
 class HTMLPreloadScanner {
     WTF_MAKE_TZONE_ALLOCATED(HTMLPreloadScanner);
 public:
-    HTMLPreloadScanner(const HTMLParserOptions&, const URL& documentURL, float deviceScaleFactor = 1.0);
+    HTMLPreloadScanner(const HTMLParserOptions&, const URL& documentURL, float deviceScaleFactor = 1.0, bool stopAtHttpEquiv = false);
 
     void appendToEnd(const SegmentedString&);
     void scan(HTMLResourcePreloader&, Document&);
@@ -110,6 +110,8 @@ private:
     TokenPreloadScanner m_scanner;
     SegmentedString m_source;
     HTMLTokenizer m_tokenizer;
+    bool m_stopAtHttpEquiv { false };
+    bool m_stoppedAtHttpEquiv { false };
 };
 
 WEBCORE_EXPORT bool testPreloadScannerViewportSupport(Document*);

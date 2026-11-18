@@ -31,6 +31,7 @@
 #include "MatchedDeclarationsCache.h"
 
 #include "CSSFontSelector.h"
+#include "FontCascadeCacheInvalidation.h"
 #include "DocumentInlines.h"
 #include "FontCascade.h"
 #include "NodeDocument.h"
@@ -42,6 +43,10 @@
 #include "StyleScope.h"
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/StringHash.h>
+
+#include <cstdlib>
+#include <wtf/DataLog.h>
+#include <wtf/text/StringView.h>
 
 namespace WebCore {
 namespace Style {
@@ -208,6 +213,25 @@ void MatchedDeclarationsCache::remove(unsigned hash)
 
 void MatchedDeclarationsCache::invalidate()
 {
+    if (isFontLoadStyleInvalidationActive()) {
+        unsigned preserved = 0;
+        m_entries.removeIf([&](auto& entry) {
+            entry.value.removeAllMatching([&](const Entry& item) {
+                if (!canPreserveStyleAfterFontLoad(*item.renderStyle, *item.parentRenderStyle))
+                    return true;
+                ++preserved;
+                return false;
+            });
+            return entry.value.isEmpty();
+        });
+        static const bool trace = StringView::fromLatin1(std::getenv("WPE_FONT_STYLE_CACHE_TRACE")) == "1"_s;
+        static unsigned traceBudget = 64;
+        if (trace && traceBudget) {
+            --traceBudget;
+            dataLogLn("WPE_FONT_STYLE_CACHE preserved=", preserved);
+        }
+        return;
+    }
     m_entries.clear();
 }
 
