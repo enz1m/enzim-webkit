@@ -140,17 +140,21 @@ void IdleCallbackController::invokeIdleCallbackTimeout(unsigned identifier)
     if (!m_document)
         return;
 
-    auto it = m_idleRequestCallbacks.findIf([identifier](auto& request) {
-        return request.identifier == identifier;
-    });
+    auto invoke = [identifier](auto& requests) {
+        auto it = requests.findIf([identifier](auto& request) {
+            return request.identifier == identifier;
+        });
+        if (it == requests.end())
+            return false;
 
-    if (it == m_idleRequestCallbacks.end())
-        return;
-
-    auto idleDeadline = IdleDeadline::create(IdleDeadline::DidTimeout::Yes);
-    auto callback = WTF::move(it->callback);
-    m_idleRequestCallbacks.remove(it);
-    callback->invoke(idleDeadline.get());
+        auto callback = WTF::move(it->callback);
+        requests.remove(it);
+        auto idleDeadline = IdleDeadline::create(IdleDeadline::DidTimeout::Yes);
+        callback->invoke(idleDeadline.get());
+        return true;
+    };
+    if (!invoke(m_idleRequestCallbacks))
+        invoke(m_runnableIdleCallbacks);
 }
 
 } // namespace WebCore
