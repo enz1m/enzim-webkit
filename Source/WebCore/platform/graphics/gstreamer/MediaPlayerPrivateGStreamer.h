@@ -706,6 +706,10 @@ private:
     std::optional<VideoFrameGStreamer::Info> m_videoInfo;
 
     bool m_volumeLocked { false };
+    bool m_settingVolume { false };
+    std::optional<double> m_lastObservedVolume;
+    std::optional<double> m_requestedVolume;
+    unsigned m_volumeTraceCount { 0 };
 
     void determineContainerTypeFromCaps(const GstCaps*);
     enum ContainerType {

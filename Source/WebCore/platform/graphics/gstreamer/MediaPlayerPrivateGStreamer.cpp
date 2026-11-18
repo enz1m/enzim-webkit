@@ -81,9 +81,13 @@
 #include "AudioSourceProviderGStreamer.h"
 #endif
 
+#include <bit>
 #include <cstring>
 #include <glib.h>
 #include <gst/audio/streamvolume.h>
+#if OS(LINUX)
+#include <dlfcn.h>
+#endif
 #include <gst/gst.h>
 #include <gst/pbutils/missing-plugins.h>
 #include <gst/pbutils/pbutils.h>
@@ -97,6 +101,7 @@
 #include <wtf/MediaTime.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/Scope.h>
+#include <wtf/SetForScope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/StringPrintStream.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -2095,6 +2100,47 @@ void MediaPlayerPrivateGStreamer::setVolumeLocked(bool volumeLocked)
     GST_DEBUG_OBJECT(pipeline(), "Volume is now %s", m_volumeLocked ? "locked" : "unlocked");
 }
 
+static std::optional<std::pair<uint64_t, uint64_t>> nativeVolumePair(GstElement* audioSink, double requested, double reported, bool trace)
+{
+    GRefPtr<GstElement> volumeElement;
+    // Match playsink's stream-volume owner selection, not the available plugin registry.
+    if (audioSink && GST_IS_BIN(audioSink))
+        volumeElement = adoptGRef(gst_bin_get_by_interface(GST_BIN(audioSink), GST_TYPE_STREAM_VOLUME));
+    else if (audioSink && GST_IS_STREAM_VOLUME(audioSink))
+        volumeElement = audioSink;
+    auto* factory = volumeElement ? gst_element_get_factory(volumeElement.get()) : nullptr;
+    const char* factoryName = factory ? GST_OBJECT_NAME(factory) : "none";
+    if (trace)
+        WTFLogAlways("ENZUI_VOLUME_OWNER factory=%s requested=%.17g reported=%.17g", factoryName, requested, reported);
+    if (!g_strcmp0(factoryName, "volume")) {
+        // GstVolume stores its configured gain as gfloat, then widens it in the double getter.
+        double represented = static_cast<float>(requested);
+        if (trace)
+            WTFLogAlways("ENZUI_VOLUME_SOFTWARE requested=%.17g reported=%.17g", represented, reported);
+        return std::pair { std::bit_cast<uint64_t>(represented), std::bit_cast<uint64_t>(reported) };
+    }
+    if (g_strcmp0(factoryName, "pulsesink"))
+        return std::nullopt;
+#if OS(LINUX)
+    auto* module = dlopen("libpulse.so.0", RTLD_LAZY | RTLD_LOCAL);
+    if (!module)
+        return std::nullopt;
+    auto releaseModule = makeScopeExit([module] { dlclose(module); });
+    using Convert = uint32_t (*)(double);
+    auto convert = reinterpret_cast<Convert>(dlsym(module, "pa_sw_volume_from_linear"));
+    if (!convert || !std::isfinite(requested) || !std::isfinite(reported))
+        return std::nullopt;
+    // Compare in the selected sink's public native representation; adjacent mixer steps stay distinct.
+    auto requestedNative = convert(requested);
+    auto reportedNative = convert(reported);
+    if (trace)
+        WTFLogAlways("ENZUI_VOLUME_NATIVE requested=%u reported=%u", requestedNative, reportedNative);
+    return std::pair<uint64_t, uint64_t> { requestedNative, reportedNative };
+#else
+    return std::nullopt;
+#endif
+}
+
 void MediaPlayerPrivateGStreamer::setVolumeDouble(double volume)
 {
     if (m_volumeLocked) {
@@ -2106,8 +2152,16 @@ void MediaPlayerPrivateGStreamer::setVolumeDouble(double volume)
     if (!streamVolume)
         return;
 
+    m_requestedVolume = volume;
+    m_notifier->cancelPendingNotifications(MainThreadNotification::VolumeChanged);
+    SetForScope settingVolume(m_settingVolume, true);
     GST_DEBUG_OBJECT(pipeline(), "Setting volume: %f", volume);
     gst_stream_volume_set_volume(streamVolume, GST_STREAM_VOLUME_FORMAT_LINEAR, volume);
+    // Sink precision and asynchronous backend replies do not own the DOM's requested value.
+    if (nativeVolumePair(m_audioSink.get(), volume, volume, false))
+        m_lastObservedVolume.reset();
+    else
+        m_lastObservedVolume = gst_stream_volume_get_volume(streamVolume, GST_STREAM_VOLUME_FORMAT_LINEAR);
     configureMediaStreamAudioTracks();
 }
 
@@ -2128,9 +2182,21 @@ void MediaPlayerPrivateGStreamer::notifyPlayerOfVolumeChange()
     if (!player)
         return;
 
-    // get_volume() can return values superior to 1.0 if the user applies software user gain via
-    // third party application (GNOME volume control for instance).
-    auto oldVolume = this->volume();
+    if (m_settingVolume)
+        return;
+
+    auto streamVolume = GST_STREAM_VOLUME(m_pipeline.get());
+    if (!streamVolume)
+        return;
+    auto oldVolume = gst_stream_volume_get_volume(streamVolume, GST_STREAM_VOLUME_FORMAT_LINEAR);
+    bool trace = !g_strcmp0(g_getenv("WPE_GSTREAMER_VOLUME_TRACE"), "1") && m_volumeTraceCount++ < 8;
+    auto nativePair = m_requestedVolume ? nativeVolumePair(m_audioSink.get(), *m_requestedVolume, oldVolume, trace) : std::nullopt;
+    if (m_lastObservedVolume == oldVolume || (nativePair && nativePair->first == nativePair->second)) {
+        m_lastObservedVolume = oldVolume;
+        return;
+    }
+    m_lastObservedVolume = oldVolume;
+    // External changes retain their native precision, including a distinct adjacent mixer step.
     auto volume = CLAMP(oldVolume, 0.0, 1.0);
 
     if (volume != oldVolume)
@@ -2142,8 +2208,10 @@ void MediaPlayerPrivateGStreamer::volumeChangedCallback(MediaPlayerPrivateGStrea
 {
     if (player->isPlayerShuttingDown())
         return;
+    if (isMainThread() && player->m_settingVolume)
+        return;
 
-    GST_DEBUG_OBJECT(player->pipeline(), "Volume changed to: %f", player->volume());
+    GST_DEBUG_OBJECT(player->pipeline(), "Backend volume notification");
 
     player->m_notifier->notify(MainThreadNotification::VolumeChanged, [player] {
         player->notifyPlayerOfVolumeChange();
@@ -3686,7 +3754,14 @@ void MediaPlayerPrivateGStreamer::createGSTPlayBin(const URL& url)
     // https://bugs.webkit.org/show_bug.cgi?id=118974 for more information.
     if (!player->platformVolumeConfigurationRequired()) {
         GST_DEBUG_OBJECT(pipeline(), "Setting stream volume to %f", player->volume());
+        m_requestedVolume = player->volume();
+        m_notifier->cancelPendingNotifications(MainThreadNotification::VolumeChanged);
+        SetForScope settingVolume(m_settingVolume, true);
         gst_stream_volume_set_volume(streamVolume, GST_STREAM_VOLUME_FORMAT_LINEAR, static_cast<double>(player->volume()));
+        if (nativeVolumePair(m_audioSink.get(), *m_requestedVolume, *m_requestedVolume, false))
+            m_lastObservedVolume.reset();
+        else
+            m_lastObservedVolume = gst_stream_volume_get_volume(streamVolume, GST_STREAM_VOLUME_FORMAT_LINEAR);
     } else
         GST_DEBUG_OBJECT(pipeline(), "Not setting stream volume, trusting system one");
 
