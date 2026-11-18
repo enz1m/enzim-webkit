@@ -51,6 +51,7 @@
 #include "WebKitWebsiteDataManagerPrivate.h"
 #include "WebKitWebsitePoliciesPrivate.h"
 #include "WebNotificationManagerProxy.h"
+#include "WebBackForwardCache.h"
 #include "WebProcessCache.h"
 #include "WebProcessMessages.h"
 #include "WebURLSchemeHandler.h"
@@ -989,6 +990,19 @@ extern "C" WEBKIT_API void webkit_web_context_enzui_clear_web_process_cache_v1(W
 {
     g_return_if_fail(WEBKIT_IS_WEB_CONTEXT(context));
     protect(webkitWebContextGetProcessPool(context).webProcessCache())->clear();
+}
+
+extern "C" WEBKIT_API void webkit_web_context_enzui_set_back_forward_cache_v1(WebKitWebContext* context, guint capacity, guint lifetimeMilliseconds)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_CONTEXT(context));
+    auto& processPool = webkitWebContextGetProcessPool(context);
+    processPool.backForwardCache().setEmbedderPolicy(processPool, capacity, Seconds::fromMilliseconds(lifetimeMilliseconds));
+}
+
+extern "C" WEBKIT_API void webkit_web_context_enzui_clear_back_forward_cache_v1(WebKitWebContext* context)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_CONTEXT(context));
+    webkitWebContextGetProcessPool(context).backForwardCache().clear();
 }
 
 void webkit_web_context_set_cache_model(WebKitWebContext*, WebKitCacheModel model)

@@ -23,6 +23,8 @@
 #include "PageClientImpl.h"
 #include "WPEUtilities.h"
 #include "WebInspectorUIProxy.h"
+#include "WebProcessMessages.h"
+#include "WebProcessProxy.h"
 #include "WebKitColorPrivate.h"
 #include "WebKitScriptDialogPrivate.h"
 #include "WebKitWebViewPrivate.h"
@@ -287,6 +289,19 @@ guint createShowOptionMenuSignal(WebKitWebViewClass* webViewClass)
         G_TYPE_BOOLEAN, 2,
         WEBKIT_TYPE_OPTION_MENU,
         WEBKIT_TYPE_RECTANGLE | G_SIGNAL_TYPE_STATIC_SCOPE);
+}
+
+// Release the memory of the web processes showing this view, as WebKit does
+// for a process about to be suspended: compiled code, decoded resources, style
+// and font caches, then a synchronous garbage collection and malloc trim. The
+// pages stay loaded. Unlike a memory pressure event, a release is not skipped
+// during the hold-off that follows an earlier one.
+extern "C" WEBKIT_API void webkit_web_view_enzui_release_memory_v1(WebKitWebView* webView)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+    webkitWebViewGetPage(webView).forEachWebContentProcess([](auto& process, auto) {
+        process.sendWithAsyncReply(Messages::WebProcess::ReleaseMemory(), [] { }, 0);
+    });
 }
 
 #if ENABLE(WPE_PLATFORM)

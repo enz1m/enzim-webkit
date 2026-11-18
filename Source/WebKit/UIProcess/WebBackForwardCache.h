@@ -27,7 +27,9 @@
 
 #include <WebCore/ProcessIdentifier.h>
 #include <pal/SessionID.h>
+#include <optional>
 #include <wtf/Forward.h>
+#include <wtf/Seconds.h>
 #include <wtf/SwiftBridging.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/WeakListHashSet.h>
@@ -53,6 +55,11 @@ public:
 
     void setCapacity(WebProcessPool&, unsigned);
     unsigned capacity() const { return m_capacity; }
+
+    // An embedder policy replaces the cache model's capacity and sets how
+    // long pages cached from now on are kept.
+    void setEmbedderPolicy(WebProcessPool&, unsigned capacity, Seconds entryLifetime);
+    Seconds entryLifetime() const { return m_entryLifetime; }
     unsigned size() const;
 
     void clear();
@@ -76,6 +83,8 @@ private:
 
     WeakRef<WebProcessPool> m_processPool;
     unsigned m_capacity { 0 };
+    std::optional<unsigned> m_embedderCapacity;
+    Seconds m_entryLifetime { 30_min };
     WeakListHashSet<WebBackForwardListItem> m_itemsWithCachedPage;
 } DERIVED_CLASS_SWIFT_SHARED_REFERENCE(refWebBackForwardCache, derefWebBackForwardCache);
 

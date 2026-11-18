@@ -39,8 +39,6 @@
 
 namespace WebKit {
 
-static const Seconds expirationDelay { 30_min };
-
 WTF_MAKE_TZONE_ALLOCATED_IMPL(WebBackForwardCacheEntry);
 
 Ref<WebBackForwardCacheEntry> WebBackForwardCacheEntry::create(WebBackForwardCache& backForwardCache, WebCore::BackForwardItemIdentifier backForwardItemID, WebCore::BackForwardFrameItemIdentifier backForwardFrameItemID, WebCore::ProcessIdentifier processIdentifier, RefPtr<SuspendedPageProxy>&& suspendedPage)
@@ -56,7 +54,7 @@ WebBackForwardCacheEntry::WebBackForwardCacheEntry(WebBackForwardCache& backForw
     , m_suspendedPage(WTF::move(suspendedPage))
     , m_expirationTimer(RunLoop::mainSingleton(), "WebBackForwardCacheEntry::ExpirationTimer"_s, this, &WebBackForwardCacheEntry::expirationTimerFired)
 {
-    m_expirationTimer.startOneShot(expirationDelay);
+    m_expirationTimer.startOneShot(backForwardCache.entryLifetime());
 }
 
 WebBackForwardCacheEntry::~WebBackForwardCacheEntry()

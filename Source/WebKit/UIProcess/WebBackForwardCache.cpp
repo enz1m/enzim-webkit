@@ -71,6 +71,7 @@ inline void WebBackForwardCache::removeOldestEntry()
 
 void WebBackForwardCache::setCapacity(WebProcessPool& pool, unsigned capacity)
 {
+    capacity = m_embedderCapacity.value_or(capacity);
     if (m_capacity == capacity)
         return;
 
@@ -79,6 +80,13 @@ void WebBackForwardCache::setCapacity(WebProcessPool& pool, unsigned capacity)
         removeOldestEntry();
 
     pool.sendToAllProcesses(Messages::WebProcess::SetBackForwardCacheCapacity(m_capacity));
+}
+
+void WebBackForwardCache::setEmbedderPolicy(WebProcessPool& pool, unsigned capacity, Seconds entryLifetime)
+{
+    m_embedderCapacity = capacity;
+    m_entryLifetime = entryLifetime;
+    setCapacity(pool, capacity);
 }
 
 unsigned WebBackForwardCache::size() const
