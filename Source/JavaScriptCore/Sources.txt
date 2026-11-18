@@ -699,13 +699,13 @@ jit/Width.cpp
 lol/LOLJIT.cpp
 lol/LOLJITOperations.cpp
 
-llint/InPlaceInterpreter.cpp
-llint/LLIntCLoop.cpp
-llint/LLIntData.cpp
-llint/LLIntEntrypoint.cpp
-llint/LLIntExceptions.cpp
-llint/LLIntSlowPaths.cpp
-llint/LLIntThunks.cpp
+llint/InPlaceInterpreter.cpp @no-unify-when(bundle<=4)
+llint/LLIntCLoop.cpp @no-unify-when(bundle<=4)
+llint/LLIntData.cpp @no-unify-when(bundle<=4)
+llint/LLIntEntrypoint.cpp @no-unify-when(bundle<=4)
+llint/LLIntExceptions.cpp @no-unify-when(bundle<=4)
+llint/LLIntSlowPaths.cpp @no-unify-when(bundle<=4)
+llint/LLIntThunks.cpp @no-unify-when(bundle<=4)
 
 parser/Lexer.cpp
 parser/LexerUnicodeProperties.cpp
