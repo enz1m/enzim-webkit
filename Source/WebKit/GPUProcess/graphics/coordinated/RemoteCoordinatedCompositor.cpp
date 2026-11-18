@@ -29,6 +29,7 @@
 #if ENABLE(GPU_PROCESS) && USE(COORDINATED_GRAPHICS) && USE(SKIA)
 
 #include "CoordinatedCompositorFrame.h"
+#include "DriverMemoryReclaim.h"
 #include "RemoteCoordinatedCompositorMessages.h"
 #include "RemoteTileReplay.h"
 #include <WebCore/AcceleratedAnimations.h>
@@ -162,6 +163,39 @@ RemoteCoordinatedCompositor::~RemoteCoordinatedCompositor() = default;
 // These are accessed only on the shared compositor queue.
 static MonotonicTime lastCompositorClose;
 static bool closeCleanupScheduled;
+
+static MonotonicTime lastCriticalRelease;
+static bool driverReclaimScheduled;
+
+// Hidden pages drop their tiles in a critical release. The driver keeps what
+// that frees until asked; see returnFreedDriverMemory(). Every page shares
+// this context with Skia, whose texture bindings the request leaves stale.
+static void returnFreedDriverMemoryNow(bool emptyCache)
+{
+    auto& display = PlatformDisplay::sharedDisplay();
+    auto* context = display.skiaGLContext();
+    if (!context || !context->makeContextCurrent())
+        return;
+    returnFreedDriverMemory(emptyCache);
+    if (auto* skiaContext = display.skiaGrContext())
+        skiaContext->resetContext(kTextureBinding_GrGLBackendState);
+}
+
+// Runs once the driver's cache delay has passed since the last release, so
+// that one request covers a burst of them.
+static void returnFreedDriverMemoryAfterRelease(WorkQueue& queue)
+{
+    static constexpr auto cacheDelay = 2500_ms;
+    auto remaining = lastCriticalRelease + cacheDelay - MonotonicTime::now();
+    if (remaining > 0_s) {
+        queue.dispatchAfter(remaining, [queue = Ref { queue }] {
+            returnFreedDriverMemoryAfterRelease(queue);
+        });
+        return;
+    }
+    driverReclaimScheduled = false;
+    returnFreedDriverMemoryNow(true);
+}
 
 void RemoteCoordinatedCompositor::releaseUnusedResourcesAfterClose()
 {
@@ -532,8 +566,13 @@ void RemoteCoordinatedCompositor::releaseMemory(CoordinatedCompositorFrame&& fra
     PlatformDisplay::sharedDisplay().skiaReleaseUnusedResources(critical ? WTF::Critical::Yes : WTF::Critical::No);
     auto& deserializer = m_pictureCache->deserializer();
     auto evicted = critical ? deserializer.evictImages(2_s, 32 * 1024 * 1024) : deserializer.evictImages(30_s, 192 * 1024 * 1024);
-    if (critical)
+    if (critical) {
         WTF::releaseFastMallocFreeMemory();
+        returnFreedDriverMemoryNow(false);
+        lastCriticalRelease = MonotonicTime::now();
+        if (!std::exchange(driverReclaimScheduled, true))
+            returnFreedDriverMemoryAfterRelease(workQueue());
+    }
 #if ENABLE(MEMORY_SAMPLER)
     logCacheMemory("release", m_identifier, deserializer, PlatformDisplay::sharedDisplay().skiaGrContext());
 #endif

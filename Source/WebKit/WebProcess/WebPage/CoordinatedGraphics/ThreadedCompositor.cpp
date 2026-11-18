@@ -30,6 +30,7 @@
 #include "AcceleratedSurface.h"
 #include "CoordinatedSceneState.h"
 #include "CoordinatedCompositorFrame.h"
+#include "DriverMemoryReclaim.h"
 #include "GPUConnectionToWebProcessMessages.h"
 #include "GPUProcessConnection.h"
 #include "LayerTreeHost.h"
@@ -1042,43 +1043,12 @@ void ThreadedCompositor::fillGLInformation(RenderProcessInfo&& info, CompletionH
     });
 }
 
-// Mesa's Intel driver packs textures of up to 1 MiB into shared slabs, two of
-// the largest entries per slab, and takes freed entries back only when an
-// allocation finds the current slab full; a freed buffer then waits in a cache
-// until another buffer is freed a second or more later. A hidden page
-// allocates nothing, so what it frees stays resident. Allocating and deleting
-// the largest entry of each slab range three times in a row always finds a
-// full slab once, which takes the freed entries back; doing it again after the
-// cache delay, ending with one buffer too large for a slab, empties the cache.
-// At most one slab per range stays behind. Other drivers just see a few
-// short-lived textures.
+// See returnFreedDriverMemory(); a hidden page allocates nothing, so what it
+// frees stays resident until this runs.
 static void nudgeDriverToReturnFreedMemory(GLContext& context, bool emptyCache)
 {
-    static const bool disabled = [] {
-        const char* value = getenv("WEBKIT_DISABLE_GPU_MEMORY_RECLAIM");
-        return value && strcmp(value, "0");
-    }();
-    if (disabled)
-        return;
-
     GLContext::ScopedGLContextCurrent scopedCurrent(context);
-    auto allocateAndDelete = [](int width, int height) {
-        GLuint texture = 0;
-        glGenTextures(1, &texture);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glDeleteTextures(1, &texture);
-    };
-    // 4 KiB, 128 KiB and 1 MiB: the largest entry of each slab range.
-    static constexpr std::array<std::pair<int, int>, 3> largestEntries { { { 32, 32 }, { 256, 128 }, { 512, 512 } } };
-    for (auto [width, height] : largestEntries) {
-        for (int i = 0; i < 3; ++i)
-            allocateAndDelete(width, height);
-    }
-    if (emptyCache)
-        allocateAndDelete(640, 512);
-    glFlush();
+    returnFreedDriverMemory(emptyCache);
 }
 
 void ThreadedCompositor::releaseMemory(WTF::Critical critical)
