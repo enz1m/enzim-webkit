@@ -42,10 +42,12 @@
 #include "SkiaUtilities.h"
 #include <atomic>
 #include <wtf/DataLog.h>
+#include <wtf/Function.h>
 #include <wtf/SetForScope.h>
 #include <wtf/text/StringView.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkPixmap.h>
+#include <skia/core/SkShader.h>
 #include <skia/gpu/ganesh/GrBackendSurface.h>
 #include <skia/gpu/ganesh/SkSurfaceGanesh.h>
 #include <skia/private/chromium/GrSurfaceCharacterization.h>
@@ -64,9 +66,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 namespace WebCore {
 
-// A canvas proxy that delegates all drawing operations to a single target canvas,
-// which can be dynamically switched. This allows GraphicsContextSkia to hold a
-// reference to this canvas while the actual target (recording vs surface) changes.
+// GraphicsContextSkia retains this canvas reference across recording/surface target changes.
 class SkiaSwitchableCanvas final : public SkNWayCanvas {
 WTF_MAKE_TZONE_ALLOCATED(SkiaSwitchableCanvas);
 public:
@@ -81,6 +81,74 @@ public:
         if (canvas)
             SkNWayCanvas::addCanvas(canvas);
     }
+#if PLATFORM(WPE)
+    void setFullClearHandler(Function<void()>&& handler)
+    {
+        m_fullClearHandler = WTF::move(handler);
+    }
+
+private:
+    void onDrawRect(const SkRect& rect, const SkPaint& paint) final
+    {
+        // CanvasRenderingContext2DBase retains one initial save for reset().
+        if (m_fullClearHandler && paint.getBlendMode_or(SkBlendMode::kSrcOver) == SkBlendMode::kClear
+            && paint.getStyle() == SkPaint::kFill_Style && !paint.getImageFilter()
+            && !paint.getMaskFilter() && !paint.getColorFilter() && getSaveCount() <= 2
+            && !m_baseHasClip && isClipRect() && rect.isFinite()
+            && getTotalMatrix().isFinite() && getTotalMatrix().rectStaysRect()) {
+            auto dimensions = getBaseLayerSize();
+            auto bounds = SkRect::MakeIWH(dimensions.width(), dimensions.height());
+            SkIRect clip;
+            SkRect cleared;
+            getTotalMatrix().mapRect(&cleared, rect);
+            if (cleared.isFinite() && getDeviceClipBounds(&clip)
+                && SkRect::Make(clip).contains(bounds) && cleared.contains(bounds))
+                m_fullClearHandler();
+        }
+        SkNWayCanvas::onDrawRect(rect, paint);
+    }
+
+    void noteClip()
+    {
+        if (getSaveCount() <= 2)
+            m_baseHasClip = true;
+    }
+
+    void onClipRect(const SkRect& rect, SkClipOp op, ClipEdgeStyle edge) final
+    {
+        noteClip();
+        SkNWayCanvas::onClipRect(rect, op, edge);
+    }
+
+    void onClipRRect(const SkRRect& rect, SkClipOp op, ClipEdgeStyle edge) final
+    {
+        noteClip();
+        SkNWayCanvas::onClipRRect(rect, op, edge);
+    }
+
+    void onClipPath(const SkPath& path, SkClipOp op, ClipEdgeStyle edge) final
+    {
+        noteClip();
+        SkNWayCanvas::onClipPath(path, op, edge);
+    }
+
+    void onClipShader(sk_sp<SkShader> shader, SkClipOp op) final
+    {
+        noteClip();
+        SkNWayCanvas::onClipShader(WTF::move(shader), op);
+    }
+
+    void onClipRegion(const SkRegion& region, SkClipOp op) final
+    {
+        noteClip();
+        SkNWayCanvas::onClipRegion(region, op);
+    }
+
+    Function<void()> m_fullClearHandler;
+    // Integer device clip bounds do not prove full coverage for fractional antialiased clips.
+    bool m_baseHasClip { false };
+#endif
+
 };
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ImageBufferSkiaAcceleratedBackend);
@@ -221,6 +289,33 @@ void ImageBufferSkiaAcceleratedBackend::ensureCanvasRecordingContext()
     m_canvasRecordingContext->applyDeviceScaleFactor(resolutionScale());
     m_canvasRecordingContext->beginRecording(GraphicsContextSkia::RecordingMode::Canvas);
     m_hasActiveRecording = true;
+
+#if PLATFORM(WPE)
+    static const bool discardFullClears = [] {
+        if (const char* value = getenv("WPE_CANVAS_FULL_CLEAR_DISCARD"))
+            return *value != '0';
+        return true;
+    }();
+    if (discardFullClears) {
+        m_switchableCanvas->setFullClearHandler([this] {
+            if (!m_hasActiveRecording || m_canvasRecordingContext->isInTransparencyLayer())
+                return;
+            m_switchableCanvas->switchToCanvas(nullptr);
+            {
+                auto discarded = m_pictureRecorder.finishRecordingAsPicture();
+                static const bool trace = StringView::fromLatin1(getenv("WPE_CANVAS_FULL_CLEAR_TRACE")) == "1"_s;
+                static thread_local unsigned traceBudget = 32;
+                if (trace && traceBudget) {
+                    --traceBudget;
+                    dataLogLn("WPE canvas full clear discarded ops=", discarded->approximateOpCount());
+                }
+            }
+            auto* recordingCanvas = m_pictureRecorder.beginRecording(size().width(), size().height());
+            m_switchableCanvas->switchToCanvas(recordingCanvas);
+            m_canvasRecordingContext->replayStateOnCanvas(*recordingCanvas);
+        });
+    }
+#endif
 }
 
 void ImageBufferSkiaAcceleratedBackend::replayCanvasRecordingContextIfNeeded()
