@@ -986,6 +986,14 @@ extern "C" WEBKIT_API void webkit_web_context_enzui_set_web_process_cache_v1(Web
     protect(processPool.webProcessCache())->setEmbedderPolicy(processPool, capacity, Seconds::fromMilliseconds(lifetimeMilliseconds));
 }
 
+// A spare web process is started once a page has loaded and kept until a page needs a process: a new
+// page, or a navigation that leaves its process, then does not wait for a launch. Memory pressure ends it.
+extern "C" WEBKIT_API void webkit_web_context_enzui_set_spare_web_process_v1(WebKitWebContext* context, gboolean enabled)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_CONTEXT(context));
+    webkitWebContextGetProcessPool(context).configuration().setIsAutomaticProcessWarmingEnabled(enabled);
+}
+
 extern "C" WEBKIT_API void webkit_web_context_enzui_clear_web_process_cache_v1(WebKitWebContext* context)
 {
     g_return_if_fail(WEBKIT_IS_WEB_CONTEXT(context));

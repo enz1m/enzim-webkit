@@ -900,6 +900,12 @@ RefPtr<WebProcessProxy> WebProcessPool::tryTakePrewarmedProcess(WebsiteDataStore
         if (process->lockdownMode() != lockdownMode || process->enhancedSecurity() != enhancedSecurity || process->crossOriginIsolation() != crossOriginIsolation)
             continue;
 
+#if PLATFORM(GTK) || PLATFORM(WPE)
+        // A sandboxed process sees the directories of the data store it was launched for, and no other's.
+        if (m_sandboxEnabled && process->websiteDataStore() != &websiteDataStore)
+            continue;
+#endif
+
         if (process->wasTerminated()) {
             // There is sometimes a delay until we get notified that a prewarmed process has been terminated (e.g. after resuming
             // from suspension) so make sure the process is still running here before deciding to use it.
@@ -917,20 +923,19 @@ RefPtr<WebProcessProxy> WebProcessPool::tryTakePrewarmedProcess(WebsiteDataStore
         return nullptr;
     }
 
-#if PLATFORM(GTK) || PLATFORM(WPE)
-    // In platforms using Bubblewrap for sandboxing, prewarmed process is launched using the WebProcessPool primary WebsiteDataStore,
-    // so we don't use it in case of using a different WebsiteDataStore.
-    if (m_sandboxEnabled)
-        return nullptr;
-#endif
-
     WTFEmitSignpost(this, ProcessPrewarming, "Using prewarmed process with pid %d", prewarmedProcess->processID());
 
     bool didRemove = m_prewarmedProcesses.remove(*prewarmedProcess);
     ASSERT_UNUSED(didRemove, didRemove);
 
     ASSERT(prewarmedProcess->isPrewarmed());
+#if PLATFORM(GTK) || PLATFORM(WPE)
+    // A sandboxed prewarmed process has had its data store since launch.
+    if (!m_sandboxEnabled)
+        prewarmedProcess->setWebsiteDataStore(websiteDataStore);
+#else
     prewarmedProcess->setWebsiteDataStore(websiteDataStore);
+#endif
     prewarmedProcess->markIsNoLongerInPrewarmedPool();
 
     return prewarmedProcess;
@@ -1159,8 +1164,49 @@ void WebProcessPool::initializeNewWebProcess(WebProcessProxy& process, WebsiteDa
     registerHighDynamicRangeChangeCallback();
 }
 
+#if PLATFORM(GTK) || PLATFORM(WPE)
+static bool showsPageOfDataStore(const WebProcessProxy& process, const WebsiteDataStore* dataStore)
+{
+    return !process.isPrewarmed() && process.websiteDataStore() == dataStore && (process.pageCount() || process.provisionalPageCount());
+}
+
+// A sandboxed spare process keeps the data store it was launched for alive, so it leaves once no page of that store is left.
+static void shutDownSpareProcessesOfUnusedDataStores(const Vector<Ref<WebProcessProxy>>& processes, const WeakHashSet<WebProcessProxy>& spareProcesses)
+{
+    for (WeakPtr maybeSpare : copyToVector(spareProcesses)) {
+        RefPtr spare = maybeSpare.get();
+        if (!spare)
+            continue;
+        if (!processes.containsIf([&](auto& process) { return showsPageOfDataStore(process.get(), spare->websiteDataStore()); }))
+            spare->shutDown();
+    }
+}
+#endif
+
 void WebProcessPool::prewarmProcess()
 {
+    RefPtr<WebsiteDataStore> dataStore;
+#if PLATFORM(GTK) || PLATFORM(WPE)
+    // A sandboxed process is given the directories of one data store when it is launched, so a spare
+    // process is made for one store: that of the newest process showing a page, the profile in use.
+    // A spare made for another store gives way to it.
+    if (m_sandboxEnabled) {
+        for (size_t index = m_processes.size(); index--;) {
+            Ref process = m_processes[index];
+            if (showsPageOfDataStore(process.get(), process->websiteDataStore())) {
+                dataStore = process->websiteDataStore();
+                break;
+            }
+        }
+        if (!dataStore)
+            return;
+        for (WeakPtr maybeSpare : copyToVector(m_prewarmedProcesses)) {
+            if (RefPtr spare = maybeSpare.get(); spare && spare->websiteDataStore() != dataStore.get())
+                spare->shutDown();
+        }
+    }
+#endif
+
     if (m_prewarmedProcesses.computeSize() >= prewarmedProcessCountLimit())
         return;
 
@@ -1173,7 +1219,7 @@ void WebProcessPool::prewarmProcess()
 
     auto lockdownMode = lockdownModeEnabledBySystem() ? WebProcessProxy::LockdownMode::Enabled : WebProcessProxy::LockdownMode::Disabled;
     auto enhancedSecurity = defaultEnhancedSecurity(*this, lockdownMode, protect(m_defaultPageGroup->preferences()));
-    createNewWebProcess(nullptr, lockdownMode, enhancedSecurity, WebProcessProxy::EnableWebAssemblyDebugger::No, WebProcessProxy::IsPrewarmed::Yes);
+    createNewWebProcess(dataStore.get(), lockdownMode, enhancedSecurity, WebProcessProxy::EnableWebAssemblyDebugger::No, WebProcessProxy::IsPrewarmed::Yes);
 }
 
 void WebProcessPool::enableProcessTermination()
@@ -1307,6 +1353,11 @@ void WebProcessPool::disconnectProcess(WebProcessProxy& process)
 
 #if ENABLE(EXTENSION_CAPABILITIES)
     ExtensionCapabilityGranter::invalidateGrants(moveToVector(std::exchange(process.extensionCapabilityGrants(), { }).values()));
+#endif
+
+#if PLATFORM(GTK) || PLATFORM(WPE)
+    if (m_sandboxEnabled)
+        shutDownSpareProcessesOfUnusedDataStores(m_processes, m_prewarmedProcesses);
 #endif
 }
 
