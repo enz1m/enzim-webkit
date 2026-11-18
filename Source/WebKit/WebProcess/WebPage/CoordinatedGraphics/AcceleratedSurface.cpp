@@ -35,6 +35,7 @@
 #include <WebCore/GLFence.h>
 #include <WebCore/Page.h>
 #include <WebCore/PlatformDisplay.h>
+#include <WebCore/ProcessCapabilities.h>
 #include <WebCore/Region.h>
 #include <WebCore/Settings.h>
 #include <WebCore/ShareableBitmap.h>
@@ -136,7 +137,12 @@ AcceleratedSurface::AcceleratedSurface(WebPage& webPage, Function<void()>&& fram
     , m_backgroundColor(webPage.effectiveBackgroundColor())
     , m_swapChain(*this)
     , m_isVisible(webPage.activityState().contains(ActivityState::IsVisible))
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    // With buffers from the GPU process the fences are that process's too.
+    , m_useExplicitSync(usesGL() && !m_swapChain.createsBuffersRemotely() && useExplicitSync())
+#else
     , m_useExplicitSync(usesGL() && useExplicitSync())
+#endif
 #if ENABLE(DAMAGE_TRACKING)
     , m_damageTracker(m_swapChain, !usesGL())
 #endif
@@ -325,13 +331,6 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::RenderTarg
         return nullptr;
     }
 
-#if ENABLE(GPU_PROCESS) && !USE(TEXTURE_MAPPER)
-    if (surface.compositesRemotely()) {
-        gbm_bo_destroy(bo);
-        return makeUnique<RenderTargetRemote>(surface, size, WTF::move(*dmaBufAttributes), bufferFormat.usage);
-    }
-#endif
-
     auto& display = PlatformDisplay::sharedDisplay();
     auto image = DMABufBuffer::createEGLImage(display.glDisplay(), *dmaBufAttributes);
     gbm_bo_destroy(bo);
@@ -353,23 +352,24 @@ AcceleratedSurface::RenderTargetEGLImage::RenderTargetEGLImage(AcceleratedSurfac
 #endif // USE(GBM)
 
 #if ENABLE(GPU_PROCESS) && !USE(TEXTURE_MAPPER)
-AcceleratedSurface::RenderTargetRemote::RenderTargetRemote(AcceleratedSurface& surface, const IntSize& size, DMABufBufferAttributes&& attributes, RendererBufferFormat::Usage usage)
+AcceleratedSurface::RenderTargetRemote::RenderTargetRemote(AcceleratedSurface& surface, const IntSize& size)
     : RenderTarget(surface, size)
 {
-    DMABufBufferAttributes attributesForCompositor {
-        attributes.size, attributes.fourcc,
-        WTF::map(attributes.fds, [](const auto& fd) { return fd.duplicate(); }),
-        attributes.offsets, attributes.strides, attributes.modifier
-    };
-    m_surface->m_remoteCompositor.connection->send(Messages::RemoteCoordinatedCompositor::RegisterBuffer(m_id, WTF::move(attributesForCompositor)), m_surface->m_remoteCompositor.identifier);
+}
+
+void AcceleratedSurface::RenderTargetRemote::didCreateRemoteBuffer(DMABufBufferAttributes&& attributes, RendererBufferFormat::Usage usage)
+{
+    m_hasBuffer = true;
     WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidCreateDMABufBuffer(m_id, WTF::move(attributes), usage), m_surface->surfaceID());
 }
 
 AcceleratedSurface::RenderTargetRemote::~RenderTargetRemote()
 {
-    if (m_surface->m_remoteCompositor.isReady)
+    // The GPU process may hold a buffer whose reply never arrived, so it is told either way.
+    if (m_surface->m_remoteCompositor.isReady && m_surface->m_remoteCompositor.connection)
         m_surface->m_remoteCompositor.connection->send(Messages::RemoteCoordinatedCompositor::UnregisterBuffer(m_id), m_surface->m_remoteCompositor.identifier);
-    WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidDestroyBuffer(m_id), m_surface->surfaceID());
+    if (m_hasBuffer)
+        WebProcess::singleton().parentProcessConnection()->send(Messages::AcceleratedBackingStore::DidDestroyBuffer(m_id), m_surface->surfaceID());
 }
 
 void AcceleratedSurface::RenderTargetRemote::sendFrame(Vector<WebCore::IntRect, 1>&& damageRects)
@@ -646,6 +646,18 @@ AcceleratedSurface::SwapChain::SwapChain(AcceleratedSurface& surface)
     }
 #endif
 
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (ProcessCapabilities::compositesInGPUProcess() && m_surface->m_renderingPurpose == RenderingPurpose::Composited) {
+        // Before the display is consulted: this process is not to have one.
+        m_type = Type::EGLImage;
+        m_createsBuffersRemotely = true;
+        setupBufferFormat();
+        Locker locker { m_bufferFormatLock };
+        m_bufferFormatChanged = false;
+        return;
+    }
+#endif
+
     auto& display = PlatformDisplay::sharedDisplay();
     switch (display.type()) {
 #if PLATFORM(GTK) || ENABLE(WPE_PLATFORM)
@@ -714,6 +726,18 @@ void AcceleratedSurface::SwapChain::setupBufferFormat()
 
     Ref webPage { m_surface->m_webPage };
     bool isOpaque = m_surface->isOpaque();
+
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+    if (m_createsBuffersRemotely) {
+        // The GPU process chooses among these with what its display supports; buffers made
+        // under the previous preferences are replaced.
+        Locker locker { m_bufferFormatLock };
+        m_remotePreferredFormats = webPage->preferredBufferFormats();
+        m_remoteBuffersAreOpaque = isOpaque;
+        m_bufferFormatChanged = true;
+        return;
+    }
+#endif
 
     // The preferred formats vector is sorted by usage, but all formats for the same usage has the same priority.
     Locker locker { m_bufferFormatLock };
@@ -813,6 +837,10 @@ std::unique_ptr<AcceleratedSurface::RenderTarget> AcceleratedSurface::SwapChain:
 #if PLATFORM(GTK) || ENABLE(WPE_PLATFORM)
 #if USE(GBM) || OS(ANDROID)
     case Type::EGLImage: {
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+        if (m_createsBuffersRemotely)
+            return makeUnique<RenderTargetRemote>(m_surface.get(), m_size);
+#endif
         Locker locker { m_bufferFormatLock };
         return RenderTargetEGLImage::create(m_surface.get(), m_size, m_bufferFormat);
     }
@@ -871,6 +899,42 @@ AcceleratedSurface::RenderTarget* AcceleratedSurface::SwapChain::nextTarget()
     m_lockedTargets.insert(0, WTF::move(target));
     return m_lockedTargets[0].get();
 }
+
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+void AcceleratedSurface::SwapChain::requestRemoteBuffers(CoordinatedCompositorFrame& frame)
+{
+    auto request = [&](const auto& targets) {
+        for (auto& target : targets) {
+            if (target->isAwaitingRemoteBuffer())
+                frame.buffersToCreate.append(target->id());
+        }
+    };
+    request(m_lockedTargets);
+    request(m_freeTargets);
+    if (frame.buffersToCreate.isEmpty())
+        return;
+    frame.bufferSize = m_size;
+    Locker locker { m_bufferFormatLock };
+    frame.bufferIsOpaque = m_remoteBuffersAreOpaque;
+    frame.preferredBufferFormats = m_remotePreferredFormats;
+}
+
+void AcceleratedSurface::SwapChain::didCreateRemoteBuffers(const Vector<uint64_t>& identifiers, Vector<DMABufBufferAttributes>&& buffers, RendererBufferFormat::Usage usage)
+{
+    // All or none are created.
+    if (buffers.size() != identifiers.size())
+        return;
+    auto deliver = [&](auto& targets) {
+        for (auto& target : targets) {
+            auto index = identifiers.find(target->id());
+            if (index != notFound && target->isAwaitingRemoteBuffer())
+                target->didCreateRemoteBuffer(WTF::move(buffers[index]), usage);
+        }
+    };
+    deliver(m_lockedTargets);
+    deliver(m_freeTargets);
+}
+#endif
 
 void AcceleratedSurface::SwapChain::releaseTarget(uint64_t targetID, UnixFileDescriptor&& releaseFence)
 {
@@ -1234,6 +1298,8 @@ std::optional<bool> AcceleratedSurface::renderFrameRemotely(CoordinatedComposito
     frame.bufferID = m_target->id();
     frame.paintsMirrored = shouldPaintMirrored();
     frame.releaseFence = m_target->takeReleaseFenceFD();
+    m_swapChain.requestRemoteBuffers(frame);
+    auto requestedBuffers = frame.buffersToCreate;
     // The reply arrives on its own queue: the main thread may be waiting for
     // this thread. A frame takes milliseconds; one that has not come back in a
     // second will not, as when the GPU process is going away.
@@ -1242,16 +1308,26 @@ std::optional<bool> AcceleratedSurface::renderFrameRemotely(CoordinatedComposito
         UnixFileDescriptor renderingFence;
         bool hasRunningAnimations { false };
         bool rendered { false };
+        Vector<DMABufBufferAttributes> createdBuffers;
+        RendererBufferFormat::Usage createdBuffersUsage { RendererBufferFormat::Usage::Rendering };
     };
     auto reply = std::make_shared<Reply>();
-    m_remoteCompositor.connection->sendWithAsyncReplyOnDispatcher(Messages::RemoteCoordinatedCompositor::RenderFrame(WTF::move(frame)), remoteCompositorReplyQueue(), [reply](UnixFileDescriptor&& renderingFence, bool hasRunningAnimations, bool rendered, Vector<uint32_t>&& evictedImages) {
+    m_remoteCompositor.connection->sendWithAsyncReplyOnDispatcher(Messages::RemoteCoordinatedCompositor::RenderFrame(WTF::move(frame)), remoteCompositorReplyQueue(), [reply](UnixFileDescriptor&& renderingFence, bool hasRunningAnimations, bool rendered, Vector<uint32_t>&& evictedImages, Vector<DMABufBufferAttributes>&& createdBuffers, RendererBufferFormat::Usage createdBuffersUsage) {
         SkiaPictureSerializer::singleton().forgetImages(evictedImages);
         reply->renderingFence = WTF::move(renderingFence);
         reply->hasRunningAnimations = hasRunningAnimations;
         reply->rendered = rendered;
+        reply->createdBuffers = WTF::move(createdBuffers);
+        reply->createdBuffersUsage = createdBuffersUsage;
         reply->semaphore.signal();
     }, m_remoteCompositor.identifier);
-    if (!reply->semaphore.waitFor(1_s) || !reply->rendered) {
+    if (!reply->semaphore.waitFor(1_s)) {
+        WTFLogAlways("GPU process compositing: frame for surface %llu was not rendered", static_cast<unsigned long long>(m_id));
+        return std::nullopt;
+    }
+    // The UI process learns of new buffers before it is sent a frame in one of them.
+    m_swapChain.didCreateRemoteBuffers(requestedBuffers, WTF::move(reply->createdBuffers), reply->createdBuffersUsage);
+    if (!reply->rendered) {
         WTFLogAlways("GPU process compositing: frame for surface %llu was not rendered", static_cast<unsigned long long>(m_id));
         return std::nullopt;
     }

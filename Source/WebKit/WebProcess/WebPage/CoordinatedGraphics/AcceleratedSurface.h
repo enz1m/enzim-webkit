@@ -232,6 +232,12 @@ private:
         virtual void setReleaseFenceFD(UnixFileDescriptor&&) { }
         virtual UnixFileDescriptor takeReleaseFenceFD() { return { }; }
         virtual void setRenderingFenceFD(UnixFileDescriptor&&) { }
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+        // For a buffer the GPU process creates: whether it is still to be asked for, and the
+        // buffer's description once the GPU process has created it.
+        virtual bool isAwaitingRemoteBuffer() const { return false; }
+        virtual void didCreateRemoteBuffer(WebCore::DMABufBufferAttributes&&, RendererBufferFormat::Usage) { }
+#endif
 
         SkSurface* skiaSurface() const { return m_skiaSurface.get(); }
 
@@ -351,13 +357,17 @@ private:
 #endif // USE(GBM) || OS(ANDROID)
 
 #if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
-    // A swap chain buffer the GPU process renders into.
+    // A swap chain buffer the GPU process creates and renders into. It has an identifier from the
+    // start and a buffer once the first frame that names it has come back; only then do the GPU
+    // process and the UI process know it.
     class RenderTargetRemote final : public RenderTarget {
     public:
-        RenderTargetRemote(AcceleratedSurface&, const WebCore::IntSize&, WebCore::DMABufBufferAttributes&&, RendererBufferFormat::Usage);
+        RenderTargetRemote(AcceleratedSurface&, const WebCore::IntSize&);
         ~RenderTargetRemote();
 
     private:
+        bool isAwaitingRemoteBuffer() const override { return !m_hasBuffer; }
+        void didCreateRemoteBuffer(WebCore::DMABufBufferAttributes&&, RendererBufferFormat::Usage) override;
         void sendFrame(Vector<WebCore::IntRect, 1>&&) override;
         void setReleaseFenceFD(UnixFileDescriptor&& fence) override { m_releaseFenceFD = WTF::move(fence); }
         UnixFileDescriptor takeReleaseFenceFD() override { return WTF::move(m_releaseFenceFD); }
@@ -365,6 +375,7 @@ private:
 
         UnixFileDescriptor m_renderingFenceFD;
         UnixFileDescriptor m_releaseFenceFD;
+        bool m_hasBuffer { false };
     };
 #endif
 
@@ -437,6 +448,14 @@ private:
         const WebCore::IntSize& size() const LIFETIME_BOUND { return m_size; }
         bool isEmpty() const { return m_freeTargets.isEmpty() && m_lockedTargets.isEmpty(); }
         RenderTarget* nextTarget();
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+        // With the compositor in the GPU process, that process creates the buffers; this one
+        // then touches neither EGL nor GBM.
+        bool createsBuffersRemotely() const { return m_createsBuffersRemotely; }
+        // Asks in a frame for the buffers not yet created, and hands out what came back.
+        void requestRemoteBuffers(CoordinatedCompositorFrame&);
+        void didCreateRemoteBuffers(const Vector<uint64_t>& identifiers, Vector<WebCore::DMABufBufferAttributes>&&, RendererBufferFormat::Usage);
+#endif
         void releaseTarget(uint64_t, UnixFileDescriptor&& releaseFence);
         void reset();
         void releaseUnusedBuffers();
@@ -476,6 +495,12 @@ private:
         mutable Lock m_bufferFormatLock;
         BufferFormat m_bufferFormat WTF_GUARDED_BY_LOCK(m_bufferFormatLock);
         bool m_bufferFormatChanged WTF_GUARDED_BY_LOCK(m_bufferFormatLock) { false };
+#endif
+#if ENABLE(GPU_PROCESS) && USE(GBM) && !USE(TEXTURE_MAPPER)
+        bool m_createsBuffersRemotely { false };
+        // What the GPU process chooses a format from, in place of m_bufferFormat.
+        Vector<RendererBufferFormat> m_remotePreferredFormats WTF_GUARDED_BY_LOCK(m_bufferFormatLock);
+        bool m_remoteBuffersAreOpaque WTF_GUARDED_BY_LOCK(m_bufferFormatLock) { true };
 #endif
 #if USE(WPE_RENDERER)
         UnixFileDescriptor m_hostFD;

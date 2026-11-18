@@ -27,6 +27,7 @@
 
 #if USE(COORDINATED_GRAPHICS) && USE(SKIA)
 
+#include "RendererBufferFormat.h"
 #include <WebCore/CoordinatedLayerChanges.h>
 #include <WebCore/IntSize.h>
 #include <WebCore/PlatformLayerIdentifier.h>
@@ -48,6 +49,14 @@ struct CoordinatedCompositorFrame {
     // The SkColor to clear the buffer with first, if any.
     std::optional<uint32_t> clearColor;
     UnixFileDescriptor releaseFence;
+    // Swap chain buffers for the compositor to create before it renders, each of bufferSize and in
+    // the first of preferredBufferFormats it can render to that suits bufferIsOpaque. The reply
+    // carries their DMA-BUF attributes in this order, or none if any could not be created. The web
+    // process allocates no graphics memory itself and so needs no graphics driver.
+    Vector<uint64_t> buffersToCreate;
+    WebCore::IntSize bufferSize;
+    bool bufferIsOpaque { true };
+    Vector<RendererBufferFormat> preferredBufferFormats;
 };
 
 } // namespace WebKit

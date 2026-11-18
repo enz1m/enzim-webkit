@@ -146,6 +146,10 @@ header: "CoordinatedCompositorFrame.h"
     bool paintsMirrored;
     std::optional<uint32_t> clearColor;
     UnixFileDescriptor releaseFence;
+    Vector<uint64_t> buffersToCreate;
+    WebCore::IntSize bufferSize;
+    bool bufferIsOpaque;
+    Vector<WebKit::RendererBufferFormat> preferredBufferFormats;
 }
 
 #endif // USE(COORDINATED_GRAPHICS) && USE(SKIA)

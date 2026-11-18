@@ -158,6 +158,20 @@ void WebProcess::platformInitializeProcess(const AuxiliaryProcessInitializationP
     addSupplementWithoutRefCountedCheck<SystemSettingsManager>();
 }
 
+// The display of a process whose pages are composited in the GPU process, created when something
+// asks for it after all: such a process starts without one (see DrawingAreaCoordinatedGraphics).
+static void initializePlatformDisplayOnDemand()
+{
+    WTFLogAlways("WebProcess: creating the graphics display on demand");
+    if (isMainRunLoop()) {
+        WebProcess::singleton().initializePlatformDisplayIfNeeded();
+        return;
+    }
+    callOnMainRunLoopAndWait([] {
+        WebProcess::singleton().initializePlatformDisplayIfNeeded();
+    });
+}
+
 void WebProcess::initializePlatformDisplayIfNeeded() const
 {
     if (PlatformDisplay::sharedDisplayIfExists())
@@ -225,6 +239,8 @@ void WebProcess::platformInitializeWebProcess(WebProcessCreationParameters& para
 
     if (!parameters.applicationName.isEmpty())
         WebCore::setApplicationName(parameters.applicationName);
+
+    PlatformDisplay::setSharedDisplayInitializer(initializePlatformDisplayOnDemand);
 
     const char* enableCPURendering = getenv("WEBKIT_SKIA_ENABLE_CPU_RENDERING");
     IGNORE_CLANG_WARNINGS_BEGIN("unsafe-buffer-usage-in-libc-call")

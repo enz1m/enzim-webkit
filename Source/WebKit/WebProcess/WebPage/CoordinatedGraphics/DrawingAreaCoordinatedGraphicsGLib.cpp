@@ -43,6 +43,7 @@
 #include <WebCore/LocalFrameView.h>
 #include <WebCore/Page.h>
 #include <WebCore/PageOverlayController.h>
+#include <WebCore/ProcessCapabilities.h>
 #include <WebCore/Region.h>
 #include <WebCore/Settings.h>
 #include <WebCore/ShareableBitmap.h>
@@ -115,7 +116,10 @@ void DrawingAreaCoordinatedGraphics::updatePreferences(const WebPreferencesStore
     Ref page = *m_webPage->corePage();
     Settings& settings = page->settings();
 #if PLATFORM(GTK) || ENABLE(WPE_PLATFORM)
-    if (settings.hardwareAccelerationEnabled()) {
+    // A process whose pages are composited in the GPU process creates no display: nothing an
+    // ordinary page does needs EGL or GBM, and so the graphics driver, here. What does (WebGL)
+    // creates the display when it is first used.
+    if (settings.hardwareAccelerationEnabled() && !WebCore::ProcessCapabilities::compositesInGPUProcess()) {
         WebProcess::singleton().initializePlatformDisplayIfNeeded();
         WebProcess::singleton().initializeVulkanIfNeeded();
     }

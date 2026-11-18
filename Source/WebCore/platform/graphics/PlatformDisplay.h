@@ -64,6 +64,9 @@ public:
 #if !PLATFORM(WIN)
     WEBCORE_EXPORT static void setSharedDisplay(std::unique_ptr<PlatformDisplay>&&);
     WEBCORE_EXPORT static PlatformDisplay* sharedDisplayIfExists();
+    // For a process that creates its display only if something turns out to need one:
+    // sharedDisplay() calls this first when there is none. It may be called on any thread.
+    WEBCORE_EXPORT static void setSharedDisplayInitializer(void (*)());
     WEBCORE_EXPORT static void destroySharedDisplay();
 #endif
     virtual ~PlatformDisplay();

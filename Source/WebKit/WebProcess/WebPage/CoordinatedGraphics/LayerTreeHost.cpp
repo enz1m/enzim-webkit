@@ -623,7 +623,8 @@ void LayerTreeHost::releaseMemory(WTF::Critical critical)
     // first frame.
     if (critical == WTF::Critical::Yes && m_isSuspended)
         m_sceneState->discardTiles();
-    PlatformDisplay::sharedDisplay().skiaReleaseUnusedResources(critical);
+    if (auto* display = PlatformDisplay::sharedDisplayIfExists())
+        display->skiaReleaseUnusedResources(critical);
     m_compositor->releaseMemory(critical);
 }
 

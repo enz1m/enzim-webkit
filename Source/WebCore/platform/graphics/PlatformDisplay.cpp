@@ -64,8 +64,17 @@ void PlatformDisplay::setSharedDisplay(std::unique_ptr<PlatformDisplay>&& displa
     s_sharedDisplay = display.release();
 }
 
+static void (*s_sharedDisplayInitializer)();
+
+void PlatformDisplay::setSharedDisplayInitializer(void (*initializer)())
+{
+    s_sharedDisplayInitializer = initializer;
+}
+
 PlatformDisplay& PlatformDisplay::sharedDisplay()
 {
+    if (!s_sharedDisplay && s_sharedDisplayInitializer) [[unlikely]]
+        s_sharedDisplayInitializer();
     RELEASE_ASSERT(s_sharedDisplay);
     return *s_sharedDisplay;
 }

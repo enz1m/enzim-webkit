@@ -43,6 +43,10 @@
 #include <WebCore/CoordinatedTileBuffer.h>
 #include <WebCore/Damage.h>
 #include <WebCore/DMABufBuffer.h>
+#if USE(GBM)
+#include <WebCore/DRMDeviceManager.h>
+#include <WebCore/GBMDevice.h>
+#endif
 #include <WebCore/FontRenderOptions.h>
 #include <WebCore/GLContext.h>
 #include <WebCore/GLDisplay.h>
@@ -84,6 +88,9 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 #include <drm_fourcc.h>
 #include <epoxy/egl.h>
+#if USE(GBM)
+#include <gbm.h>
+#endif
 #if USE(LIBEPOXY)
 #include <epoxy/gl.h>
 #else
@@ -358,6 +365,128 @@ void RemoteCoordinatedCompositor::registerBuffer(uint64_t bufferID, DMABufBuffer
     m_targets.add(bufferID, WTF::move(target));
 }
 
+#if USE(GBM)
+struct SwapChainBufferFormat {
+    uint32_t fourcc { 0 };
+    Vector<uint64_t, 1> modifiers;
+    RendererBufferFormat::Usage usage { RendererBufferFormat::Usage::Rendering };
+};
+
+// The choice AcceleratedSurface makes for buffers it creates itself: the first of the UI's
+// preferred formats that this display renders to, preferring one that matches the page's opacity.
+// The list comes from the web process, so nothing about its shape is assumed.
+static SwapChainBufferFormat chooseSwapChainBufferFormat(const Vector<RendererBufferFormat>& preferredFormats, bool isOpaque)
+{
+    auto isOpaqueFormat = [](uint32_t fourcc) {
+        return fourcc != DRM_FORMAT_ARGB8888
+            && fourcc != DRM_FORMAT_RGBA8888
+            && fourcc != DRM_FORMAT_ABGR8888
+            && fourcc != DRM_FORMAT_BGRA8888
+            && fourcc != DRM_FORMAT_ARGB2101010
+            && fourcc != DRM_FORMAT_ABGR2101010
+            && fourcc != DRM_FORMAT_ARGB16161616F
+            && fourcc != DRM_FORMAT_ABGR16161616F;
+    };
+
+    SwapChainBufferFormat chosen;
+    const auto& supportedFormats = PlatformDisplay::sharedDisplay().bufferFormats();
+    for (const auto& bufferFormat : preferredFormats) {
+        bool matchesOpacity = false;
+        for (const auto& format : supportedFormats) {
+            auto index = bufferFormat.formats.findIf([&](const auto& item) {
+                return format.fourcc == item.fourcc;
+            });
+            if (index == notFound)
+                continue;
+            const auto& preferredFormat = bufferFormat.formats[index];
+            matchesOpacity = isOpaqueFormat(preferredFormat.fourcc) == isOpaque;
+            if (!matchesOpacity && chosen.fourcc)
+                continue;
+            chosen.usage = bufferFormat.usage;
+            chosen.fourcc = preferredFormat.fourcc;
+            if (preferredFormat.modifiers.isEmpty() || preferredFormat.modifiers[0] == DRM_FORMAT_MOD_INVALID)
+                chosen.modifiers = { DRM_FORMAT_MOD_INVALID };
+            else {
+                chosen.modifiers = WTF::compactMap(preferredFormat.modifiers, [&format](uint64_t modifier) -> std::optional<uint64_t> {
+                    if (format.modifiers.contains(modifier))
+                        return modifier;
+                    return std::nullopt;
+                });
+            }
+            if (matchesOpacity)
+                break;
+        }
+        if (chosen.fourcc && matchesOpacity)
+            break;
+    }
+    return chosen;
+}
+#endif // USE(GBM)
+
+Vector<DMABufBufferAttributes> RemoteCoordinatedCompositor::createBuffers(const CoordinatedCompositorFrame& frame, RendererBufferFormat::Usage& usage)
+{
+#if USE(GBM)
+    // A swap chain has at most four buffers; the request is the web process's.
+    static constexpr size_t maximumBuffers = 4;
+    static constexpr int maximumSize = 16384;
+    if (frame.buffersToCreate.isEmpty() || frame.buffersToCreate.size() > maximumBuffers)
+        return { };
+    auto size = frame.bufferSize;
+    if (size.width() <= 0 || size.height() <= 0 || size.width() > maximumSize || size.height() > maximumSize)
+        return { };
+
+    auto format = chooseSwapChainBufferFormat(frame.preferredBufferFormats, frame.bufferIsOpaque);
+    // The display's own device, whichever node a format's usage names: this process holds no other.
+    auto device = DRMDeviceManager::singleton().mainGBMDevice(DRMDeviceManager::NodeType::Render);
+    if (!format.fourcc || !device) {
+        WTFLogAlways("GPU process compositing: no format or device for a swap chain buffer of %dx%d", size.width(), size.height());
+        return { };
+    }
+
+    auto enableModifiers = format.modifiers.size() == 1 && format.modifiers[0] == DRM_FORMAT_MOD_INVALID
+        ? DMABufBufferAttributes::EnableModifiers::No : DMABufBufferAttributes::EnableModifiers::Yes;
+    Vector<DMABufBufferAttributes> created;
+    for (auto bufferID : frame.buffersToCreate) {
+        uint32_t flags = format.usage == RendererBufferFormat::Usage::Scanout ? GBM_BO_USE_SCANOUT : GBM_BO_USE_RENDERING;
+        struct gbm_bo* bo = nullptr;
+        if (enableModifiers == DMABufBufferAttributes::EnableModifiers::Yes && !format.modifiers.isEmpty())
+            bo = gbm_bo_create_with_modifiers2(device->device(), size.width(), size.height(), format.fourcc, format.modifiers.span().data(), format.modifiers.size(), flags);
+        if (!bo) {
+            if (format.usage == RendererBufferFormat::Usage::Mapping)
+                flags |= GBM_BO_USE_LINEAR;
+            bo = gbm_bo_create(device->device(), size.width(), size.height(), format.fourcc, flags);
+        }
+        auto attributes = bo ? DMABufBufferAttributes::fromGBMBufferObject(bo, enableModifiers) : std::nullopt;
+        // The DMA-BUF descriptors keep the buffer.
+        if (bo)
+            gbm_bo_destroy(bo);
+        if (attributes) {
+            // A buffer asked for again was created for a reply that never arrived.
+            unregisterBuffer(bufferID);
+            registerBuffer(bufferID, DMABufBufferAttributes {
+                attributes->size, attributes->fourcc,
+                WTF::map(attributes->fds, [](const auto& fd) { return fd.duplicate(); }),
+                attributes->offsets, attributes->strides, attributes->modifier
+            });
+        }
+        if (!attributes || !m_targets.contains(bufferID)) {
+            WTFLogAlways("GPU process compositing: could not create a swap chain buffer of %dx%d", size.width(), size.height());
+            for (size_t index = 0; index < created.size(); ++index)
+                unregisterBuffer(frame.buffersToCreate[index]);
+            unregisterBuffer(bufferID);
+            return { };
+        }
+        created.append(WTF::move(*attributes));
+    }
+    usage = format.usage;
+    return created;
+#else
+    UNUSED_PARAM(frame);
+    UNUSED_PARAM(usage);
+    return { };
+#endif
+}
+
 void RemoteCoordinatedCompositor::unregisterBuffer(uint64_t bufferID)
 {
     auto target = m_targets.take(bufferID);
@@ -579,23 +708,27 @@ void RemoteCoordinatedCompositor::releaseMemory(CoordinatedCompositorFrame&& fra
     completionHandler(WTF::move(evicted));
 }
 
-void RemoteCoordinatedCompositor::renderFrame(CoordinatedCompositorFrame&& frame, CompletionHandler<void(UnixFileDescriptor&&, bool, bool, Vector<uint32_t>&&)>&& completionHandler)
+void RemoteCoordinatedCompositor::renderFrame(CoordinatedCompositorFrame&& frame, CompletionHandler<void(UnixFileDescriptor&&, bool, bool, Vector<uint32_t>&&, Vector<DMABufBufferAttributes>&&, RendererBufferFormat::Usage)>&& completionHandler)
 {
+    auto createdBuffersUsage = RendererBufferFormat::Usage::Rendering;
     if (!ensureContext()) {
-        completionHandler({ }, false, false, { });
+        completionHandler({ }, false, false, { }, { }, createdBuffersUsage);
         return;
     }
 
     applyFrameChanges(frame);
 
+    // Created buffers are reported even if the frame then fails, so that the web process knows them.
+    auto createdBuffers = createBuffers(frame, createdBuffersUsage);
+
     auto it = m_targets.find(frame.bufferID);
     if (it == m_targets.end()) {
-        completionHandler({ }, false, false, { });
+        completionHandler({ }, false, false, { }, WTF::move(createdBuffers), createdBuffersUsage);
         return;
     }
     auto& target = it->value;
     if (target.paintsMirrored != frame.paintsMirrored && !createSurface(target, frame.paintsMirrored)) {
-        completionHandler({ }, false, false, { });
+        completionHandler({ }, false, false, { }, WTF::move(createdBuffers), createdBuffersUsage);
         return;
     }
 
@@ -643,7 +776,7 @@ void RemoteCoordinatedCompositor::renderFrame(CoordinatedCompositorFrame&& frame
 #if ENABLE(MEMORY_SAMPLER)
     logCacheMemory("frame", m_identifier, m_pictureCache->deserializer(), PlatformDisplay::sharedDisplay().skiaGrContext());
 #endif
-    completionHandler(WTF::move(renderingFence), hasRunningAnimations, true, m_pictureCache->deserializer().evictImages(30_s, 192 * 1024 * 1024));
+    completionHandler(WTF::move(renderingFence), hasRunningAnimations, true, m_pictureCache->deserializer().evictImages(30_s, 192 * 1024 * 1024), WTF::move(createdBuffers), createdBuffersUsage);
 }
 
 } // namespace WebKit

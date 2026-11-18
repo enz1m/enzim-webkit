@@ -31,7 +31,7 @@ messages -> RemoteCoordinatedCompositor {
     RegisterBuffer(uint64_t bufferID, WebCore::DMABufBufferAttributes attributes)
     UnregisterBuffer(uint64_t bufferID)
     ReleaseMemory(struct WebKit::CoordinatedCompositorFrame frame, bool critical) -> (Vector<uint32_t> evictedImages)
-    RenderFrame(struct WebKit::CoordinatedCompositorFrame frame) -> (UnixFileDescriptor renderingFence, bool hasRunningAnimations, bool rendered, Vector<uint32_t> evictedImages)
+    RenderFrame(struct WebKit::CoordinatedCompositorFrame frame) -> (UnixFileDescriptor renderingFence, bool hasRunningAnimations, bool rendered, Vector<uint32_t> evictedImages, Vector<WebCore::DMABufBufferAttributes> createdBuffers, WebKit::RendererBufferFormat::Usage createdBuffersUsage)
 }
 
 #endif

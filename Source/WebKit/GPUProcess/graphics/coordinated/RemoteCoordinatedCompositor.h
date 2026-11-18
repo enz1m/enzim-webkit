@@ -27,6 +27,7 @@
 
 #if ENABLE(GPU_PROCESS) && USE(COORDINATED_GRAPHICS) && USE(SKIA)
 
+#include "RendererBufferFormat.h"
 #include "WorkQueueMessageReceiver.h"
 #include <WebCore/CoordinatedBackingStoreProxy.h>
 #include <WebCore/DMABufBufferAttributes.h>
@@ -95,7 +96,7 @@ private:
 
     void registerBuffer(uint64_t bufferID, WebCore::DMABufBufferAttributes&&);
     void unregisterBuffer(uint64_t bufferID);
-    void renderFrame(CoordinatedCompositorFrame&&, CompletionHandler<void(UnixFileDescriptor&&, bool, bool, Vector<uint32_t>&&)>&&);
+    void renderFrame(CoordinatedCompositorFrame&&, CompletionHandler<void(UnixFileDescriptor&&, bool, bool, Vector<uint32_t>&&, Vector<WebCore::DMABufBufferAttributes>&&, RendererBufferFormat::Usage)>&&);
     void releaseMemory(CoordinatedCompositorFrame&&, bool critical, CompletionHandler<void(Vector<uint32_t>&&)>&&);
     void applyFrameChanges(CoordinatedCompositorFrame&);
 
@@ -114,6 +115,8 @@ private:
         bool paintsMirrored { false };
     };
     bool createSurface(RenderTarget&, bool paintsMirrored);
+    // Creates the buffers a frame asks for and registers them as targets. All or none.
+    Vector<WebCore::DMABufBufferAttributes> createBuffers(const CoordinatedCompositorFrame&, RendererBufferFormat::Usage&);
     void destroyTarget(RenderTarget&);
 
     const Ref<IPC::Connection> m_connection;
