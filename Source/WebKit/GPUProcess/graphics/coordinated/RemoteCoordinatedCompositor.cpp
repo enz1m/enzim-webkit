@@ -53,6 +53,7 @@
 #include <WebCore/GLFence.h>
 #include <WebCore/NativeImage.h>
 #include <WebCore/PlatformDisplay.h>
+#include <WebCore/Region.h>
 #include <WebCore/RenderingMode.h>
 #include <WebCore/SkiaCompositingLayer.h>
 #include <WebCore/SkiaRecordingResult.h>
@@ -632,6 +633,9 @@ void RemoteCoordinatedCompositor::applyChanges(SkiaCompositingLayer& layer, Coor
         return;
 
     auto& tiles = *changes.tiles;
+    m_incompleteTiles.removeAllMatching([&](auto& replay) {
+        return replay.layer == changes.id && (replay.contentsScale != tiles.contentsScale || tiles.tilesToRemove.contains(replay.tileID));
+    });
     auto recordings = WTF::map(WTF::move(tiles.recordings), [&](auto&& data) -> RefPtr<SkiaRecordingResult> {
         auto picture = m_pictureCache->deserializer().deserialize(data.picture.span());
         if (!picture) {
@@ -646,14 +650,17 @@ void RemoteCoordinatedCompositor::applyChanges(SkiaCompositingLayer& layer, Coor
     for (auto& tile : tiles.tilesToUpdate) {
         if (tile.recordingIndex >= recordings.size() || !recordings[tile.recordingIndex])
             continue;
+        supersedeIncompleteTile(changes.id, tile.tileID, tile.dirtyRect);
         Ref recording = *recordings[tile.recordingIndex];
         auto flags = recording->contentsOpaque() ? CoordinatedTileBuffer::NoFlags : CoordinatedTileBuffer::SupportsAlpha;
         Ref buffer = CoordinatedAcceleratedTileBuffer::create(m_threadSafeGrContext, tile.tileRect.size(), flags);
         IntRect dirtyRect = tile.dirtyRect;
         dirtyRect.moveBy(tile.tileRect.location());
-        tileReplayWorkerPool().postTask([buffer, recording = WTF::move(recording), tileRect = tile.tileRect, dirtyRect] {
+        auto complete = std::make_shared<std::atomic<bool>>(true);
+        m_tileReplays.append({ changes.id, tile.tileID, tile.tileRect, tile.dirtyRect, recording, tiles.contentsScale, remoteTileImageGeneration(), complete });
+        tileReplayWorkerPool().postTask([buffer, recording = WTF::move(recording), tileRect = tile.tileRect, dirtyRect, complete] {
             if (buffer->beginPainting()) {
-                replayRemoteTile(buffer.get(), recording.get(), tileRect, dirtyRect);
+                complete->store(replayRemoteTile(buffer.get(), recording.get(), tileRect, dirtyRect));
                 buffer->completePainting();
             }
         });
@@ -666,12 +673,85 @@ void RemoteCoordinatedCompositor::applyChanges(SkiaCompositingLayer& layer, Coor
     m_pendingTileUpdates.append({ layer, WTF::move(update), tiles.contentsScale });
 }
 
+void RemoteCoordinatedCompositor::supersedeIncompleteTile(PlatformLayerIdentifier layer, uint32_t tileID, const IntRect& dirtyRect)
+{
+    Vector<TileReplay> remaining;
+    m_incompleteTiles.removeAllMatching([&](auto& replay) {
+        if (replay.layer != layer || replay.tileID != tileID || !replay.dirtyRect.intersects(dirtyRect))
+            return false;
+        // A partial update only supersedes its own pixels. Keep older
+        // recordings for any uncovered pixels that still need the image.
+        Region uncovered { replay.dirtyRect };
+        uncovered.subtract(Region { dirtyRect });
+        for (auto& rect : uncovered.rects()) {
+            auto fragment = replay;
+            fragment.dirtyRect = rect;
+            remaining.append(WTF::move(fragment));
+        }
+        return true;
+    });
+    m_incompleteTiles.appendVector(WTF::move(remaining));
+}
+
+void RemoteCoordinatedCompositor::repaintIncompleteTiles()
+{
+    auto generation = remoteTileImageGeneration();
+    struct Attempt {
+        TileReplay tile;
+        Ref<SkiaCompositingLayer> layer;
+        Ref<CoordinatedTileBuffer> buffer;
+    };
+    Vector<Attempt> attempts;
+    for (auto& tile : std::exchange(m_incompleteTiles, { })) {
+        if (tile.imageGeneration == generation) {
+            m_incompleteTiles.append(WTF::move(tile));
+            continue;
+        }
+        RefPtr layer = m_layers.get(tile.layer);
+        if (!layer)
+            continue;
+        auto flags = tile.recording->contentsOpaque() ? CoordinatedTileBuffer::NoFlags : CoordinatedTileBuffer::SupportsAlpha;
+        Ref buffer = CoordinatedAcceleratedTileBuffer::create(m_threadSafeGrContext, tile.tileRect.size(), flags);
+        IntRect dirtyRect = tile.dirtyRect;
+        dirtyRect.moveBy(tile.tileRect.location());
+        tile.imageGeneration = generation;
+        tile.complete = std::make_shared<std::atomic<bool>>(true);
+        // Fall back to drawing the original if cache pressure repeatedly
+        // evicts the scaled copies before this tile can use them.
+        bool allowAsyncScaling = ++tile.repaintAttempts < 3;
+        tileReplayWorkerPool().postTask([buffer, recording = tile.recording, tileRect = tile.tileRect, dirtyRect, complete = tile.complete, allowAsyncScaling] {
+            if (buffer->beginPainting()) {
+                complete->store(replayRemoteTile(buffer.get(), recording.get(), tileRect, dirtyRect, allowAsyncScaling));
+                buffer->completePainting();
+            }
+        });
+        attempts.append({ WTF::move(tile), layer.releaseNonNull(), WTF::move(buffer) });
+    }
+    for (auto& attempt : attempts)
+        attempt.buffer->waitUntilPaintingComplete();
+    for (auto& attempt : attempts) {
+        if (!attempt.tile.complete->load()) {
+            m_incompleteTiles.append(WTF::move(attempt.tile));
+            continue;
+        }
+        Vector<CoordinatedBackingStoreProxy::Update::TileUpdate> tilesToUpdate;
+        tilesToUpdate.append({ attempt.tile.tileID, attempt.tile.tileRect, attempt.tile.dirtyRect, attempt.buffer });
+        CoordinatedBackingStoreProxy::Update update;
+        update.appendUpdate({ }, WTF::move(tilesToUpdate), { });
+        attempt.layer->updateBackingStore(WTF::move(update), attempt.tile.contentsScale);
+        attempt.layer->processPendingTileUpdates();
+    }
+}
+
 void RemoteCoordinatedCompositor::applyFrameChanges(CoordinatedCompositorFrame& frame)
 {
     for (auto identifier : frame.removedLayers) {
         if (auto layer = m_layers.take(identifier))
             layer->invalidate();
         m_imageBackingStores.remove(identifier);
+        m_incompleteTiles.removeAllMatching([&](auto& tile) {
+            return tile.layer == identifier;
+        });
     }
     for (auto& changes : frame.layers) {
         auto& layer = ensureLayer(changes.id);
@@ -683,6 +763,11 @@ void RemoteCoordinatedCompositor::applyFrameChanges(CoordinatedCompositorFrame& 
         pending.layer->updateBackingStore(WTF::move(pending.update), pending.contentsScale);
         pending.layer->processPendingTileUpdates();
     }
+    for (auto& replay : std::exchange(m_tileReplays, { })) {
+        if (!replay.complete->load())
+            m_incompleteTiles.append(WTF::move(replay));
+    }
+    repaintIncompleteTiles();
 }
 
 void RemoteCoordinatedCompositor::releaseMemory(CoordinatedCompositorFrame&& frame, bool critical, CompletionHandler<void(Vector<uint32_t>&&)>&& completionHandler)
@@ -776,7 +861,9 @@ void RemoteCoordinatedCompositor::renderFrame(CoordinatedCompositorFrame&& frame
 #if ENABLE(MEMORY_SAMPLER)
     logCacheMemory("frame", m_identifier, m_pictureCache->deserializer(), PlatformDisplay::sharedDisplay().skiaGrContext());
 #endif
-    completionHandler(WTF::move(renderingFence), hasRunningAnimations, true, m_pictureCache->deserializer().evictImages(30_s, 192 * 1024 * 1024), WTF::move(createdBuffers), createdBuffersUsage);
+    // While a tile waits for an image scaled in the background, frames go on
+    // as for an animation, so that it is painted again once the image is ready.
+    completionHandler(WTF::move(renderingFence), hasRunningAnimations || !m_incompleteTiles.isEmpty(), true, m_pictureCache->deserializer().evictImages(30_s, 192 * 1024 * 1024), WTF::move(createdBuffers), createdBuffersUsage);
 }
 
 } // namespace WebKit

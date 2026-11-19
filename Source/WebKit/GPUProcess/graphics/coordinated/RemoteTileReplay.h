@@ -40,9 +40,13 @@ namespace WebKit {
 // Replays a tile recording into its buffer. An image that arrived encoded and
 // is drawn at half its size or smaller is drawn from a copy decoded at the
 // nearest smaller power of two, as Chromium decodes images at the scale they
-// are drawn; the copies are kept in a budget shared by every page.
-void replayRemoteTile(WebCore::CoordinatedTileBuffer&, const WebCore::SkiaRecordingResult&, const WebCore::IntRect& tileRect, const WebCore::IntRect& dirtyRect);
+// are drawn; the copies are kept in a budget shared by every page. A copy too
+// large to make without holding the frame is made in the background and the
+// tile is painted without it: the replay then returns false, and the tile is
+// to be replayed again once remoteTileImageGeneration() has changed.
+bool replayRemoteTile(WebCore::CoordinatedTileBuffer&, const WebCore::SkiaRecordingResult&, const WebCore::IntRect& tileRect, const WebCore::IntRect& dirtyRect, bool allowAsyncScaling = true);
 void releaseUnusedRemoteTileImages(Seconds);
+uint64_t remoteTileImageGeneration();
 
 } // namespace WebKit
 

@@ -31,9 +31,13 @@
 #include "WorkQueueMessageReceiver.h"
 #include <WebCore/CoordinatedBackingStoreProxy.h>
 #include <WebCore/DMABufBufferAttributes.h>
+#include <WebCore/IntRect.h>
 #include <WebCore/IntSize.h>
 #include <WebCore/PlatformLayerIdentifier.h>
+#include <WebCore/SkiaRecordingResult.h>
 #include <WebCore/SkiaRemotePicture.h>
+#include <atomic>
+#include <memory>
 #include <wtf/HashMap.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/ThreadSafeRefCounted.h>
@@ -136,6 +140,25 @@ private:
     };
     Vector<PendingTileUpdate> m_pendingTileUpdates;
     Vector<Ref<WebCore::CoordinatedTileBuffer>> m_paintingTiles;
+    // A tile replay, kept until it is known to have drawn every image: a
+    // tile painted while one of its images was still being scaled in the
+    // background is painted again from its recording once the image is ready.
+    struct TileReplay {
+        WebCore::PlatformLayerIdentifier layer;
+        uint32_t tileID { 0 };
+        WebCore::IntRect tileRect;
+        // In the tile's coordinates.
+        WebCore::IntRect dirtyRect;
+        Ref<WebCore::SkiaRecordingResult> recording;
+        float contentsScale { 1 };
+        uint64_t imageGeneration { 0 };
+        std::shared_ptr<std::atomic<bool>> complete;
+        unsigned repaintAttempts { 0 };
+    };
+    void supersedeIncompleteTile(WebCore::PlatformLayerIdentifier, uint32_t tileID, const WebCore::IntRect& dirtyRect);
+    void repaintIncompleteTiles();
+    Vector<TileReplay> m_tileReplays;
+    Vector<TileReplay> m_incompleteTiles;
     sk_sp<GrContextThreadSafeProxy> m_threadSafeGrContext;
 };
 
